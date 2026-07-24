@@ -1,0 +1,416 @@
+---
+title: Metadata Inspection
+description: Layer 1 - Forensic EXIF and software signature analysis
+---
+
+# Layer 1: Metadata Inspection
+
+**Metadata Forensics** is MAYA's first forensic layer, analyzing embedded file data and software signatures to detect manipulation traces.
+
+## What is Metadata?
+
+Metadata is "data about data" - information embedded in media files that describes their origin, creation method, and technical properties.
+
+### Types of Metadata
+
+| Type | Examples | Forensic Value |
+|------|----------|-----------------|
+| **EXIF** | Camera model, ISO, aperture, timestamp | Reveals camera profile mismatches |
+| **IPTC** | Keywords, copyright, description | Shows editing history |
+| **XMP** | Color space, software used | Detects manipulation tools |
+| **Container** | Codec, bitrate, duration | Reveals format tampering |
+
+## EXIF Data Forensics
+
+### What is EXIF?
+
+EXIF (Exchangeable Image File Format) is the standard for embedding technical photo metadata.
+
+**Key EXIF Fields:**
+
+```json
+{
+  "Model": "Canon EOS 5D Mark IV",
+  "Make": "Canon",
+  "DateTime": "2024-01-15 10:30:45",
+  "ExposureTime": "1/500",
+  "FNumber": 5.6,
+  "ISOSpeedRatings": 1600,
+  "FocalLength": 85,
+  "LensModel": "EF85mm f/1.8 USM",
+  "Software": "Adobe Photoshop 2024 v25.1"
+}
+```
+
+### Forensic Analysis
+
+MAYA extracts and analyzes EXIF data for suspicious indicators:
+
+#### 1. Missing Camera Profile
+
+```javascript
+// RED FLAG: No camera metadata
+if (!exifData.Make || !exifData.Model) {
+  flags.push({
+    flag: 'MISSING_CAMERA_PROFILE',
+    severity: 'MEDIUM',
+    reason: 'Photo lacks camera identification data',
+    implication: 'Could be AI-generated or heavily processed'
+  });
+}
+```
+
+**Why it matters:**
+- Authentic photos always have camera metadata
+- AI-generated images have no camera source
+- Heavily edited images may strip metadata
+
+#### 2. Impossible Camera Combinations
+
+```javascript
+// Validate camera lens compatibility
+const cameraLensDatabase = {
+  'Canon EOS 5D Mark IV': ['EF24-70mm', 'EF85mm', 'EF24-105mm'],
+  'iPhone 14 Pro': ['Main', 'Ultra Wide', 'Telephoto']
+};
+
+if (exifData.Model && exifData.LensModel) {
+  const validLenses = cameraLensDatabase[exifData.Model];
+  
+  if (!validLenses.some(lens => 
+      exifData.LensModel.includes(lens))) {
+    flags.push({
+      flag: 'IMPOSSIBLE_CAMERA_COMBINATION',
+      severity: 'HIGH',
+      camera: exifData.Model,
+      lens: exifData.LensModel,
+      implication: 'Camera-lens combination does not exist'
+    });
+  }
+}
+```
+
+**Why it matters:**
+- Different cameras use incompatible lenses
+- Mismatches indicate metadata tampering
+- Easy to verify against known hardware
+
+#### 3. Suspicious Software Signatures
+
+```javascript
+// Check for suspicious editing software
+const suspiciousSoftware = {
+  'Photoshop': { concern: 'Manual editing capability' },
+  'Generative Fill': { concern: 'AI content generation' },
+  'DALL-E': { concern: 'Synthetic image generation' },
+  'Stable Diffusion': { concern: 'AI model inference' },
+  'Adobe Firefly': { concern: 'Generative AI' }
+};
+
+if (exifData.Software) {
+  for (const [software, concern] of Object.entries(suspiciousSoftware)) {
+    if (exifData.Software.includes(software)) {
+      flags.push({
+        flag: 'GENERATIVE_SOFTWARE_DETECTED',
+        severity: 'HIGH',
+        software,
+        concern: concern.concern,
+        implication: 'Image likely contains AI-generated content'
+      });
+    }
+  }
+}
+```
+
+**Detected Software:**
+- Adobe Photoshop (generative fill)
+- DALL-E
+- Midjourney
+- Stable Diffusion
+- Adobe Firefly
+- Microsoft Designer
+
+#### 4. Timestamp Anomalies
+
+```javascript
+// Check for impossible timestamps
+const exifTime = new Date(exifData.DateTime);
+const now = new Date();
+
+if (exifTime > now) {
+  flags.push({
+    flag: 'FUTURE_TIMESTAMP',
+    severity: 'HIGH',
+    implication: 'Photo timestamp is in the future'
+  });
+}
+
+// Check for batch processing timestamps
+if (lastPhotoTime && 
+    Math.abs(exifTime - lastPhotoTime) < 100 && 
+    exifTime !== lastPhotoTime) {
+  flags.push({
+    flag: 'RAPID_BATCH_PROCESSING',
+    severity: 'MEDIUM',
+    implication: 'Photos processed in suspiciously rapid sequence'
+  });
+}
+```
+
+**Why it matters:**
+- Timestamps reveal processing patterns
+- Rapid sequences indicate batch generation
+- Future timestamps indicate tampering
+
+## Software Signature Detection
+
+### Generative Fill Detection
+
+```javascript
+// Adobe Photoshop Generative Fill signature
+const detectGenerativeFill = (exifData) => {
+  const signatures = [
+    exifData.Software?.includes('Generative Fill'),
+    exifData.ProcessingSoftware?.includes('Neural Filters'),
+    exifData.CreatorTool?.includes('Firefly')
+  ];
+  
+  return signatures.some(sig => sig === true);
+};
+
+if (detectGenerativeFill(exifData)) {
+  flags.push({
+    flag: 'GENERATIVE_FILL_DETECTED',
+    severity: 'HIGH',
+    software: 'Adobe Photoshop (Generative Fill)',
+    implications: [
+      'Content generated by AI',
+      'May not represent reality',
+      'Requires disclosure'
+    ]
+  });
+}
+```
+
+### AI Image Generator Detection
+
+```javascript
+// Detect if image was created by AI
+const detectAIGeneration = (metadata) => {
+  const aiSignatures = [
+    { name: 'DALL-E', markers: ['DALL-E', 'OpenAI'] },
+    { name: 'Midjourney', markers: ['Midjourney'] },
+    { name: 'Stable Diffusion', markers: ['Stable Diffusion'] },
+    { name: 'Adobe Firefly', markers: ['Adobe Firefly'] }
+  ];
+  
+  for (const ai of aiSignatures) {
+    if (ai.markers.some(m => 
+        metadata.Software?.includes(m) ||
+        metadata.Comments?.includes(m))) {
+      return {
+        detected: true,
+        model: ai.name,
+        severity: 'CRITICAL'
+      };
+    }
+  }
+  
+  return { detected: false };
+};
+```
+
+## File Integrity Verification
+
+### SHA-256 Hashing
+
+```javascript
+// Calculate file hash for integrity verification
+async function calculateFileHash(fileBuffer) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', fileBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// Compare with known authentic versions
+const knownAuthenticFiles = {
+  'abc123def456...': {
+    name: 'authentic-press-conference.jpg',
+    date: '2024-01-15',
+    verified: true
+  }
+};
+
+const fileHash = await calculateFileHash(file);
+if (knownAuthenticFiles[fileHash]) {
+  flags.push({
+    flag: 'VERIFIED_AUTHENTIC',
+    severity: 'NONE',
+    verified: true
+  });
+}
+```
+
+## ISO & Technical Analysis
+
+### ISO Value Consistency
+
+```javascript
+// Check if ISO is reasonable for lighting conditions
+function analyzeISO(exifData, imageBrightness) {
+  const { ISOSpeedRatings } = exifData;
+  
+  // Brightness analysis (0-255 scale)
+  if (imageBrightness > 200 && ISOSpeedRatings > 3200) {
+    flags.push({
+      flag: 'UNUSUAL_ISO_BRIGHTNESS_MISMATCH',
+      severity: 'LOW',
+      iso: ISOSpeedRatings,
+      brightness: imageBrightness,
+      implication: 'High ISO in bright conditions suggests improper exposure'
+    });
+  }
+  
+  if (imageBrightness < 50 && ISOSpeedRatings < 400) {
+    flags.push({
+      flag: 'LOW_ISO_DARK_CONDITIONS',
+      severity: 'LOW',
+      iso: ISOSpeedRatings,
+      brightness: imageBrightness,
+      implication: 'Low ISO in dark conditions suggests image enhancement'
+    });
+  }
+}
+```
+
+## Metadata Scoring Algorithm
+
+### Scoring Calculation
+
+```javascript
+function calculateMetadataScore(flags) {
+  let score = 100; // Start with perfect score
+  
+  for (const flag of flags) {
+    switch (flag.severity) {
+      case 'CRITICAL':
+        score -= 35;
+        break;
+      case 'HIGH':
+        score -= 20;
+        break;
+      case 'MEDIUM':
+        score -= 10;
+        break;
+      case 'LOW':
+        score -= 3;
+        break;
+    }
+  }
+  
+  // Floor at 0
+  return Math.max(0, score);
+}
+
+// Example:
+// - Start: 100
+// - Generative fill detected (HIGH): -20 = 80
+// - Missing camera profile (MEDIUM): -10 = 70
+// - Final score: 70
+```
+
+## Example Report
+
+### Image Analysis Example
+
+```
+METADATA FORENSICS REPORT
+═════════════════════════════
+
+File: suspicious_photo.jpg
+Size: 2.4 MB
+Format: JPEG
+
+EXIF Data Found: ✓
+Camera: Canon EOS 5D Mark IV
+Software: Adobe Photoshop 2024 v25.1
+ISO: 3200
+DateTime: 2024-01-15 10:30:45
+
+⚠️ FINDINGS:
+─────────────
+
+[HIGH] Generative Fill Detected
+Location: Software signature
+Implication: Image likely contains AI-generated content
+Severity: HIGH
+
+[MEDIUM] ISO/Brightness Mismatch
+ISO: 3200 | Brightness: 220/255
+Implication: High ISO in bright conditions
+Severity: MEDIUM
+
+✓ Camera Profile Valid
+✓ Timestamp Reasonable
+
+METADATA SCORE: 60%
+═════════════════════════════
+```
+
+## Best Practices for Authentic Media
+
+### For Content Creators
+
+✅ **DO:**
+- Keep original EXIF data intact
+- Preserve camera metadata
+- Document any edits clearly
+- Use reputable software
+
+❌ **DON'T:**
+- Strip all metadata
+- Use generative fills without disclosure
+- Mix incompatible camera data
+- Edit timestamps
+
+### For Verification
+
+✅ **DO:**
+- Check for complete EXIF data
+- Verify camera-lens combinations
+- Look for software signatures
+- Compare multiple files
+
+❌ **DON'T:**
+- Trust metadata alone
+- Assume stripped metadata = fake
+- Ignore context
+- Miss obvious indicators
+
+## Limitations
+
+### When Metadata Inspection Fails
+
+1. **Stripped Metadata** - Legitimate images can have metadata removed
+2. **Spoofed Data** - Technical users can fake EXIF data
+3. **Limited Indicators** - Not all AI tools leave signatures
+4. **Context-Dependent** - Generative fill isn't always suspicious
+
+### Why Multi-Layer Detection Matters
+
+Metadata alone can be manipulated, which is why MAYA uses three independent layers:
+
+- Layer 1 (Metadata) + Layer 2 (Face Mesh) + Layer 3 (Audio) = Comprehensive Detection
+
+## Next Steps
+
+- 🎭 [Face Mesh Analysis](/features/face-mesh) - Layer 2 facial landmark detection
+- 🎵 [Audio Synchronization](/features/audio-synchronization) - Layer 3 audio-visual sync
+- 📊 [Authenticity Dashboard](/features/authenticity-dashboard) - Result visualization
+- ⏱️ [Timeline Detection](/features/timeline-detection) - Temporal analysis
+
+---
+
+**Metadata is just the beginning. Explore the other forensic layers.** Continue to [Face Mesh Analysis](/features/face-mesh).
