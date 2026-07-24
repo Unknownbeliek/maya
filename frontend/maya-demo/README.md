@@ -1,16 +1,68 @@
-# React + Vite
+# Maya - Deepfake & Digital Media Authenticity Verification
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Maya is a tool designed to detect manipulated or AI-generated multimedia. As generative AI advances, it becomes increasingly challenging to distinguish authentic digital media from manipulated content. This project aims to provide a set of tools to analyze and verify the authenticity of images and videos.
 
-Currently, two official plugins are available:
+## Problem Statement
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The rapid advancement of generative AI has made it increasingly challenging to distinguish
+authentic digital media from manipulated content. Deepfake videos, AI-generated voices,
+and synthetic images pose significant risks to journalism, public safety, elections,
+businesses, and digital trust.
 
-## React Compiler
+This project aims to develop a solution capable of detecting manipulated or AI-generated multimedia by
+leveraging AI/ML models, digital forensics, metadata analysis, and content verification
+techniques. The platform should verify images and videos, provide a confidence score, and
+help users check whether the content is real or AI-generated before or after sharing it online.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Features
 
-## Expanding the Oxlint configuration
+- **Facial Anomaly Detection:** Utilizes MediaPipe's FaceLandmarker to detect facial anomalies in real-time, such as:
+  - Low blink rate
+  - Rigid head pose
+  - Face disappearing from the frame
+- **File Metadata Analysis:** Extracts and displays EXIF metadata from files to identify the software used to create or modify the media.
+- **File Hashing:** Calculates the SHA256 hash of the uploaded file for integrity verification.
+- **Audio Kinematics Analysis:** (Future) Analyze audio for signs of manipulation.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Tech Stack
+
+- **Frontend:**
+  - React
+  - Vite
+  - TailwindCSS
+- **Analysis:**
+  - MediaPipe Tasks Vision (`@mediapipe/tasks-vision`)
+  - ExifReader.js
+- **Backend:** (Future)
+  - Node.js
+  - Express
+
+## Getting Started
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    ```
+2.  **Navigate to the frontend directory:**
+    ```bash
+    cd maya/frontend/maya-demo
+    ```
+3.  **Install dependencies:**
+    ```bash
+    npm install
+    ```
+4.  **Run the development server:**
+    ```bash
+    npm run dev
+    ```
+5.  Open your browser and navigate to `http://localhost:5173` (or the address shown in your terminal).
+
+## Folder Structure
+
+The `src` folder is organized as follows:
+
+- `src/analysis`: Contains modules for performing various analyses (facial, hashing, metadata).
+- `src/assets`: Static assets like images and fonts.
+- `src/components`: Reusable React components.
+- `src/hooks`: Custom React hooks, like `useFaceMesh` for MediaPipe integration.
+- `src/`: Root contains the main application entry point and global styles.

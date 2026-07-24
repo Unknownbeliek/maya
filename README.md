@@ -23,13 +23,15 @@ To preserve user privacy and maintain zero infrastructure costs, all visual faci
 ## 🚀 Key Features
 
 * **🔍 Multi-Layered Forensic Inspection:**
-  * **Layer 1: Provenance & EXIF Metadata Header Analysis** — Extracts cryptographic hashes (SHA-256), resolution, and software signatures (e.g., Photoshop, AI Generators, missing camera profiles).
-  * **Layer 2: 3D Spatial Face Mesh Tracking** — Leverages Google MediaPipe via WebGL to map **468 3D facial landmarks** in real time to monitor facial warping and abnormal blink rates.
+  * **Layer 1: Provenance & EXIF Metadata Header Analysis** — Extracts cryptographic hashes (SHA-256), resolution, and software signatures (e.g., Photoshop, AI Generators).
+  * **Layer 2: Advanced Facial Landmark Analysis** — Leverages Google MediaPipe to map **478 3D facial landmarks** in real-time. This layer detects:
+      * **Blink Rate Monitoring:** Detects unnatural or missing blink patterns common in deepfakes.
+      * **Head Pose Stability Analysis:** Flags unnaturally rigid or static head positions.
+      * **Spatial Warping & Glitches:** Monitors for inconsistent facial geometry or tracking failures.
   * **Layer 3: Audio-Visual Kinematic Calibration** — Uses the Web Audio API to measure speech decibel peaks against physical mouth/lip distance to pinpoint phoneme-lip desynchronization.
 * **⏱️ Interactive Timestamp Scrubbing:** Automatically flags anomaly timestamps (e.g., `00:04 - Lip Sync Offset 80ms`). Clicking any flagged badge jumps the video head directly to the glitch frame.
 * **🛡️ Zero-Cloud Privacy Architecture:** Media files are processed in-browser on the user's GPU/CPU. Sensitive personal media is never uploaded to external servers.
-* **🎛️ Live Demo Switcher:** Built-in presentation toggles between *Sample A (Authentic - 96%)* and *Sample B (Deepfake - 38%)* for reliable live judging demos.
-* **🔗 Dynamic Web Link Parsing (In Development):** Direct streaming of `.mp4` URLs and YouTube links via a lightweight `yt-dlp` stream proxy.
+* **🔗 Dynamic Web Link Parsing (Implemented):** Direct streaming of `.mp4` URLs and YouTube links via a lightweight `yt-dlp` backend service.
 * **🌐 Live Web Source Attribution (In Development):** Extracts keyframe signatures and queries live reverse-search indexes (Google Lens / SerpApi) to locate the earliest authentic web source clip.
 
 ---
