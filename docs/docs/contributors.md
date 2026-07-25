@@ -133,7 +133,7 @@ Help other users:
 
 ```bash
 # Clone repository
-git clone https://github.com/brainwave2026/maya.git
+git clone https://github.com/Unknownbeliek/maya.git
 cd maya
 
 # Install all dependencies
@@ -242,8 +242,8 @@ We recognize all contributors:
 - Show & tell
 
 **Email:**
-- security@maya.example.com (Security issues)
-- contact@maya.example.com (General inquiries)
+- [security@maya.example.com](mailto:security@maya.example.com) (Security issues)
+- [contact@maya.example.com](mailto:contact@maya.example.com) (General inquiries)
 
 ### Conduct & Values
 
@@ -293,7 +293,7 @@ MAYA embraces:
 - Violate others' privacy
 - Flamewars or trolling
 
-**Violations:** Report to conduct@maya.example.com
+**Violations:** Report to [conduct@maya.example.com](mailto:conduct@maya.example.com)
 
 ## Getting Started as Contributor
 
@@ -317,7 +317,7 @@ git clone https://github.com/YOUR-USERNAME/maya.git
 cd maya
 
 # Add upstream
-git remote add upstream https://github.com/brainwave2026/maya.git
+git remote add upstream https://github.com/Unknownbeliek/maya.git
 
 # Install & setup
 npm install --workspaces
@@ -450,16 +450,16 @@ MAYA strives to:
 
 **Ready to contribute?**
 
-1. Read [Contributing Guide](https://github.com/brainwave2026/maya/blob/main/CONTRIBUTING.md)
-2. Browse [Good First Issues](https://github.com/brainwave2026/maya/issues?q=label:%22good%20first%20issue%22)
+1. Read Contributing Guide included in the repository.
+2. Browse Good First Issues available in the GitHub repository.
 3. Setup development environment
 4. Create PR!
 
 ## Questions?
 
-- 💬 [GitHub Discussions](https://github.com/brainwave2026/maya/discussions)
+- 💬 [GitHub Discussions](https://github.com/Unknownbeliek/maya/discussions)
 - 📧 [Email us](mailto:contact@maya.example.com)
-- 🐛 [Report issues](https://github.com/brainwave2026/maya/issues)
+- 🐛 [Report issues](https://github.com/Unknownbeliek/maya/issues)
 
 ---
 

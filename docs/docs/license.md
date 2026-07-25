@@ -179,14 +179,14 @@ MAYA uses several open-source dependencies. Each has its own license:
  * MAYA - Multi-Modal Digital Media Authenticity Verification Engine
  * MIT License
  * Copyright © 2026 MAYA Team - BrainWave 2026 Hackathon
- * Original: https://github.com/brainwave2026/maya
+ * Original: https://github.com/Unknownbeliek/maya
  */
 ```
 
 **In documentation:**
 
 ```markdown
-This project uses [MAYA](https://github.com/brainwave2026/maya) 
+This project uses [MAYA](https://github.com/Unknownbeliek/maya) 
 (MIT License, © 2026 MAYA Team)
 ```
 
@@ -194,7 +194,7 @@ This project uses [MAYA](https://github.com/brainwave2026/maya)
 
 ```
 Powered by MAYA
-https://github.com/brainwave2026/maya
+https://github.com/Unknownbeliek/maya
 ```
 
 ## Legal Disclaimers
@@ -322,18 +322,18 @@ By submitting a PR, you agree to these terms.
 ### What if I find a security vulnerability?
 
 **Report it responsibly:**
-1. Email: security@maya.example.com
+1. Email: [security@maya.example.com](mailto:security@maya.example.com)
 2. Include vulnerability details
 3. Don't publish publicly until fixed
 4. Authors will acknowledge and fix
 
 ### Can I trademark "MAYA"?
 
-**Not for the same purpose.** The MAYA team may hold trademarks. Different use cases may be negotiable. Contact: contact@maya.example.com
+**Not for the same purpose.** The MAYA team may hold trademarks. Different use cases may be negotiable. Contact: [contact@maya.example.com](mailto:contact@maya.example.com)
 
 ## License Full Text
 
-The complete MIT License is available in the [LICENSE](https://github.com/brainwave2026/maya/blob/main/LICENSE) file in the repository.
+The complete MIT License is available in the [LICENSE](https://github.com/Unknownbeliek/maya/blob/main/LICENSE) file in the repository.
 
 ```
 MIT License
@@ -363,8 +363,8 @@ SOFTWARE.
 
 - 📧 [Email legal@maya.example.com](mailto:legal@maya.example.com)
 - 📖 [Read MIT License Explanation](https://opensource.org/licenses/MIT)
-- 🤝 [GitHub Discussion](https://github.com/brainwave2026/maya/discussions)
-- 📋 [LICENSE File](https://github.com/brainwave2026/maya/blob/main/LICENSE)
+- 🤝 [GitHub Discussion](https://github.com/Unknownbeliek/maya/discussions)
+- 📋 [LICENSE File](https://github.com/Unknownbeliek/maya/blob/main/LICENSE)
 
 ---
 

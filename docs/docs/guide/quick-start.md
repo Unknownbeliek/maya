@@ -71,18 +71,25 @@ Navigate to `http://localhost:5173` in your browser.
 
 ### Understanding the Dashboard
 
+![MAYA interactive browser dashboard](/maya-dashboard.jpg)
+
+*Figure 1 — The MAYA browser dashboard interface.*
+
 The interactive dashboard displays:
 
 | Component | Description |
 |-----------|-------------|
-| **Authenticity Score** | 0-100% score with confidence level |
-| **Metadata Breakdown** | EXIF data and suspicious software flags |
-| **Face Mesh Timeline** | Frame-by-frame facial landmark tracking |
-| **Sync Analysis** | Lip-audio synchronization visualization |
-| **Warning Cards** | Individual flags and anomalies detected |
-| **Detailed Report** | Complete forensic analysis |
+| **Authenticity Score** | 0–100% score with per-layer confidence level |
+| **Metadata Breakdown** | EXIF provenance and suspicious software flags |
+| **Multi-Layer Status** | Live status indicators for EXIF, Face Mesh, and Audio Spectrum |
+| **Flagged Moments** | Timestamped list of specific anomaly events |
+| **Audit Report** | Traceable evidence summary and export options |
 
-### Example Report
+### Generated Audit Report
+
+![MAYA confidential audit report](/maya-report.jpg)
+
+*Figure 2 — Generated MAYA forensic authenticity audit report.*
 
 ```
 Authenticity Analysis: 68%

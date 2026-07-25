@@ -28,7 +28,23 @@ export default defineConfig({
         {
           text: 'Getting Started',
           items: [
-            { text: 'Introduction', link: '/guide/introduction' },
+            {
+              text: 'Introduction',
+              link: '/guide/introduction',
+              collapsed: false,
+              items: [
+                { text: 'Overview', link: '/guide/introduction#introduction' },
+                { text: 'Problem', link: '/guide/introduction#what-problem-does-maya-solve' },
+                { text: 'Challenge', link: '/guide/introduction#the-challenge' },
+                { text: 'Solution', link: '/guide/introduction#the-maya-solution' },
+                { text: 'Features', link: '/guide/introduction#key-features' },
+                { text: 'Architecture', link: '/guide/introduction#architecture-overview' },
+                { text: 'Technology', link: '/guide/introduction#technology-highlights' },
+                { text: 'Use Cases', link: '/guide/introduction#use-cases' },
+                { text: 'Next Steps', link: '/guide/introduction#next-steps' },
+                { text: 'Diagram', link: '/guide/introduction#architecture-diagram' },
+              ],
+            },
             { text: 'Problem Statement', link: '/guide/problem-statement' },
             { text: 'Quick Start', link: '/guide/quick-start' },
           ],

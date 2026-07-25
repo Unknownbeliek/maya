@@ -9,6 +9,10 @@ MAYA is a multi-layered digital media authentication system built on a privacy-f
 
 ## High-Level Architecture
 
+![MAYA interactive browser dashboard interface](/maya-dashboard.jpg)
+
+*Figure 1 — MAYA browser interface orchestrating multi-layer client-side forensic analysis.*
+
 ```mermaid
 graph TB
     subgraph Frontend["Frontend (React + Vite)"]
