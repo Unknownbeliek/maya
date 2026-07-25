@@ -19,7 +19,7 @@ Get MAYA up and running locally in just a few minutes.
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/brainwave2026/maya.git
+git clone https://github.com/Unknownbeliek/maya.git
 cd maya
 ```
 
@@ -43,7 +43,7 @@ npm install
 
 ```bash
 cd backend
-npm run dev
+node server.js
 # Server running on http://localhost:3000
 ```
 
@@ -60,13 +60,6 @@ npm run dev
 Navigate to `http://localhost:5173` in your browser.
 
 ## Using MAYA
-
-### Analyze an Image
-
-1. **Click "Upload Media"** button on the home page
-2. **Select an image** from your device
-3. **Wait for analysis** (typically 2-5 seconds)
-4. **Review the results** in the interactive dashboard
 
 ### Analyze a Video
 
@@ -164,7 +157,8 @@ npm install
 npm run dev -- --port 5174
 
 # Backend (default 3000)
-PORT=3001 npm run dev
+# Update the port constant in backend/server.js, then restart:
+node server.js
 ```
 
 ### Issue: WebGL Not Available
@@ -183,36 +177,10 @@ npm install @mediapipe/face_mesh
 
 ## Environment Variables
 
-### Backend Environment
+No environment variables are required for the current repository state.
 
-Create a `.env` file in the `backend/` directory:
-
-```bash
-# Server Configuration
-PORT=3000
-NODE_ENV=development
-
-# CORS Settings
-CORS_ORIGIN=http://localhost:5173
-
-# File Upload
-MAX_FILE_SIZE=100mb
-UPLOAD_TEMP_DIR=./temp
-```
-
-### Frontend Environment
-
-Create a `.env.local` file in `frontend/maya-demo/`:
-
-```bash
-# API Configuration
-VITE_API_URL=http://localhost:3000
-
-# Feature Flags
-VITE_ENABLE_FACE_MESH=true
-VITE_ENABLE_AUDIO_ANALYSIS=true
-VITE_ENABLE_METADATA_EXTRACTION=true
-```
+- Frontend runs with default Vite configuration.
+- Backend runs with a fixed port in `backend/server.js`.
 
 ## Testing Your Installation
 
@@ -228,13 +196,12 @@ VITE_ENABLE_METADATA_EXTRACTION=true
 
 ```javascript
 // In browser console
-// Check if MediaPipe is loaded
-console.log(window.selfieSegmentation); // Should exist
-
-// Check API connectivity
-fetch('http://localhost:3000/health')
-  .then(r => r.json())
+// Confirm backend root endpoint responds
+fetch('http://localhost:3000/')
+  .then(r => r.text())
   .then(d => console.log('Backend:', d));
+
+// No red runtime errors should appear while analyzing a sample video.
 ```
 
 ## Next Steps
@@ -249,7 +216,7 @@ fetch('http://localhost:3000/health')
 ::: tip Need assistance?
 - Check [FAQ](/faq) for common questions
 - Review [Installation Guide](/installation/setup) for detailed setup
-- Consult [GitHub Issues](https://github.com/brainwave2026/maya/issues)
+- Consult [GitHub Issues](https://github.com/Unknownbeliek/maya/issues)
 - Join our community discussions
 :::
 

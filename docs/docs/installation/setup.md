@@ -48,17 +48,7 @@ Download and install from [git-scm.com](https://git-scm.com):
 git --version     # git version 2.30.0 or higher
 ```
 
-### 3. MongoDB (Optional, for backend)
-
-Download from [mongodb.com/try/download/community](https://www.mongodb.com/try/download/community):
-
-**Verify installation:**
-
-```bash
-mongod --version
-```
-
-### 4. Text Editor
+### 3. Text Editor
 
 Use any of:
 - **VS Code** (recommended) - [code.visualstudio.com](https://code.visualstudio.com)
@@ -72,7 +62,7 @@ Use any of:
 
 ```bash
 # Clone the repository
-git clone https://github.com/brainwave2026/maya.git
+git clone https://github.com/Unknownbeliek/maya.git
 cd maya
 
 # Verify directory structure
@@ -112,84 +102,25 @@ cd backend
 # Install dependencies
 npm install
 
-# Create environment file
-cp .env.example .env
-
-# Edit .env with your settings (see below)
-nano .env
-
 # Start backend
-npm run dev
+node server.js
 # Server running on http://localhost:3000
 ```
 
 ### Step 4: Access MAYA
 
 Open your browser and navigate to:
-```
+
 `http://localhost:5173`
-```
 
 You should see the MAYA home page!
 
 ## Environment Configuration
 
-### Frontend Environment
+No environment configuration is required for the current repository.
 
-Create `frontend/maya-demo/.env.local`:
-
-```bash
-# API Configuration
-VITE_API_URL=http://localhost:3000
-
-# Feature Flags
-VITE_ENABLE_FACE_MESH=true
-VITE_ENABLE_AUDIO_ANALYSIS=true
-VITE_ENABLE_METADATA_EXTRACTION=true
-
-# Analytics (optional)
-VITE_ANALYTICS_ENABLED=false
-
-# Debug Mode
-VITE_DEBUG=false
-```
-
-### Backend Environment
-
-Create `backend/.env`:
-
-```bash
-# Server
-PORT=3000
-NODE_ENV=development
-HOST=localhost
-
-# Database
-MONGODB_URI=mongodb://localhost:27017/maya
-MONGO_DB_NAME=maya_db
-
-# Cache (Redis)
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
-
-# CORS
-CORS_ORIGIN=http://localhost:5173
-
-# File Upload
-MAX_FILE_SIZE=100mb
-UPLOAD_TEMP_DIR=./temp
-
-# Logging
-LOG_LEVEL=info
-
-# Security
-JWT_SECRET=your-secret-key-change-this
-ALLOWED_ORIGINS=http://localhost:5173
-
-# Analytics
-ANALYTICS_ENABLED=false
-```
+- Frontend uses Vite defaults.
+- Backend runs on a fixed `port = 3000` in `backend/server.js`.
 
 ## Project Structure
 
@@ -220,8 +151,7 @@ maya/
 ├── backend/
 │   ├── server.js                    # Express app
 │   ├── package.json                 # Dependencies
-│   ├── .env.example                 # Example env
-│   └── README.md
+│   └── package-lock.json            # Lockfile
 │
 └── docs/
     ├── docs/                        # VitePress content
@@ -254,12 +184,9 @@ ls -la dist/
 # In backend directory
 cd backend
 
-# Test database connection
-node -e "require('mongoose').connect(process.env.MONGODB_URI)" 
-
-# Or just verify server starts
-npm run dev
-# Should see: "Server running on port 3000"
+# Verify server starts
+node server.js
+# Should see: "Example app listening on port 3000"
 ```
 
 ### Browser Tests
@@ -267,13 +194,12 @@ npm run dev
 Open browser console (F12) and test:
 
 ```javascript
-// Test MediaPipe loading
-console.log('FaceMesh available:', typeof FaceMesh);
-
-// Test API connectivity
-fetch('http://localhost:3000/health')
-  .then(r => r.json())
+// Backend root endpoint check
+fetch('http://localhost:3000/')
+  .then(r => r.text())
   .then(d => console.log('Backend:', d));
+
+// During analysis, DevTools console should remain free of runtime errors.
 ```
 
 ## Common Installation Issues
@@ -296,8 +222,8 @@ node --version
 npm run dev -- --port 5174
 
 # Backend (3000)
-# Edit .env: PORT=3001
-npm run dev
+# Edit backend/server.js and change `const port = 3000`
+node server.js
 ```
 
 ### Issue: Module not found
@@ -312,37 +238,24 @@ npm cache clean --force
 npm install
 ```
 
-### Issue: MongoDB connection fails
+### Issue: Backend process exits immediately
 
 ```bash
-# Verify MongoDB is running
-mongod --version
+# Make sure dependencies are installed
+cd backend
+npm install
 
-# Start MongoDB service
-# Windows: mongod (in new terminal)
-# Mac: brew services start mongodb-community
-# Linux: sudo service mongod start
-
-# Check connection
-mongo --version
-mongo
-# Should connect successfully
+# Start server directly
+node server.js
 ```
 
-### Issue: CORS errors
+### Issue: Browser cannot reach backend
 
-```
-Access to XMLHttpRequest blocked by CORS policy
-```
+Ensure backend is running in a separate terminal with:
 
-**Solution:** Ensure API URL is correctly set:
-
-```javascript
-// .env.local
-VITE_API_URL=http://localhost:3000
-
-// Verify in browser Network tab
-// Should see http://localhost:3000/api/...
+```bash
+cd backend
+node server.js
 ```
 
 ### Issue: WebGL not available
@@ -365,7 +278,7 @@ WebGL: CONTEXT_LOST_WEBGL: loseContext: context lost
 
 ```bash
 cd backend
-npm run dev
+node server.js
 ```
 
 **Terminal 2 - Frontend:**

@@ -13,7 +13,6 @@ export default defineConfig({
   lastUpdated: true,
 
   themeConfig: {
-    logo: '/logo.svg',
     siteTitle: 'MAYA',
 
     nav: [
@@ -21,7 +20,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/introduction', activeMatch: '/guide/' },
       { text: 'Architecture', link: '/architecture/overview', activeMatch: '/architecture/' },
       { text: 'Reference', link: '/reference/tech-stack', activeMatch: '/reference/' },
-      { text: 'GitHub', link: 'https://github.com' },
+      { text: 'GitHub', link: 'https://github.com/Unknownbeliek/maya' },
     ],
 
     sidebar: {
@@ -75,17 +74,16 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com' },
-      { icon: 'twitter', link: 'https://twitter.com' },
+      { icon: 'github', link: 'https://github.com/Unknownbeliek/maya' },
     ],
 
     footer: {
       message: 'Made with ❤️ for BrainWave 2026',
-      copyright: 'Copyright © 2026 MAYA Team | Released under the MIT License',
+      copyright: 'Copyright © 2026 UNB | Released under the MIT License',
     },
 
     editLink: {
-      pattern: 'https://github.com/brainwave2026/maya/edit/main/docs/docs/:path',
+      pattern: 'https://github.com/Unknownbeliek/maya/edit/main/docs/docs/:path',
       text: 'Edit this page on GitHub',
     },
 

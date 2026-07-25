@@ -7,10 +7,7 @@ titleTemplate: Digital Media Authenticity Verification
 hero:
   name: MAYA
   text: Explainable Digital Media Authenticity Verification
-  tagline: Detect deepfakes with forensic precision. No uploading. No storing. 100% privacy.
-  image:
-    src: /logo-dark.svg
-    alt: MAYA Logo
+  tagline: Explainable AI-powered, browser-based forensic analysis with multi-layer verification, no uploads, no cloud processing, and instant local results.
   actions:
     - theme: brand
       text: 📚 Get Started
@@ -20,87 +17,87 @@ hero:
       link: /guide/quick-start
     - theme: alt
       text: 🐙 GitHub
-      link: https://github.com
+      link: https://github.com/Unknownbeliek/maya
 
 features:
   - icon: 🔐
     title: Privacy First
-    details: All analysis runs locally in your browser. No media is uploaded or permanently stored.
+    details: Analysis runs locally in the browser so source media stays on-device without upload or cloud retention.
     
   - icon: 🧠
     title: Explainable AI
-    details: Get detailed insights into why media is suspicious, not just a yes/no answer.
+    details: Reports include traceable indicators and confidence context instead of a binary authentic/fake result.
     
   - icon: ⚡
     title: Three-Layer Detection
-    details: Metadata forensics, facial landmarks, and audio-visual synchronization analysis.
+    details: Correlates metadata integrity, facial geometry consistency, and audio-visual synchronization signals.
     
   - icon: 📊
     title: Interactive Dashboard
-    details: Beautiful timeline visualization with detailed forensic reports and authenticity scores.
+    details: Provides timeline evidence, per-layer diagnostics, and an explainable authenticity summary.
     
   - icon: 🎯
     title: Real-Time Processing
-    details: WebGL-accelerated face mesh and web audio API for instant analysis.
+    details: Uses browser-native acceleration for low-latency forensic processing and fast feedback.
     
   - icon: 🛠️
     title: Open Source
-    details: Built with modern web technologies. Contributions welcome!
+    details: Built as an auditable open-source platform with modular components and transparent development.
 
 ---
 
 ## What is MAYA?
 
-**MAYA** (Multi-Modal Digital Media Authenticity Verification Engine) is an explainable digital media authenticity verification platform designed to detect manipulated media through forensic analysis.
+**MAYA** (Multi-Modal Digital Media Authenticity Verification Engine) is an explainable digital media authenticity verification platform.
 
-Unlike traditional deepfake detectors that simply output "Real" or "Fake", MAYA explains **why** a media file is suspicious using three independent forensic inspection layers:
-
-1. **Metadata Inspection** - Analyzes embedded camera data, software signatures, and file anomalies
-2. **Face Mesh Analysis** - Tracks 468 facial landmarks for geometric inconsistencies
-3. **Audio-Visual Synchronization** - Compares lip movement with audio timing
+It is designed to detect manipulated media and explain **why** a file appears suspicious, not just output a binary result.
 
 ## Why MAYA?
 
-Digital media manipulation is advancing faster than our ability to detect it. Traditional solutions are:
+MAYA focuses on transparent analysis with privacy-first local processing:
 
-- **Black boxes** - They don't explain their decisions
-- **Centralized** - Your media is uploaded to third-party servers
-- **Slow** - Cloud processing adds latency
-- **Expensive** - Cloud infrastructure has real costs
+- **Explainable AI**: Reports include evidence and per-layer reasoning.
+- **Browser-based**: Analysis runs directly in the browser.
+- **Privacy-first**: No uploads and no cloud-side media processing.
+- **Fast feedback**: Multi-layer checks run in near real time.
 
-MAYA is different:
+## Browser Workflow
 
-```
-Your Media → Browser-based Analysis → Forensic Report
-           (No uploading)            (No storage)
-```
+::: info End-to-End Local Analysis
+Media
+
+↓
+
+Browser Analysis
+
+↓
+
+Explainable Authenticity Report
+:::
 
 ## Technology Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Frontend** | React + Vite | Interactive UI |
-| **Face Analysis** | MediaPipe Face Mesh | 468-point facial tracking |
-| **Metadata** | EXIFReader / exif-js | Camera profile forensics |
-| **Audio** | Web Audio API | Frequency analysis & timing |
-| **Acceleration** | WebGL + WebAssembly | Real-time processing |
+| Layer | Technology | Technical Role |
+|-------|-----------|----------------|
+| Frontend | React + Vite | Powers the interactive analysis interface and rendering flow. |
+| Face Analysis | MediaPipe Face Mesh | Extracts facial landmarks for geometric consistency checks. |
+| Metadata | EXIFReader | Parses embedded metadata for provenance and anomaly signals. |
+| Audio | Web Audio API | Derives timing and spectrum features for synchronization analysis. |
+| Acceleration | Browser GPU/compute APIs | Supports responsive client-side analysis workloads. |
 
-## Hackathon Goals
+## Project Highlights
 
-MAYA was built for **BrainWave 2026** with focus on:
-
-- ✅ **Architecture** - Clean, modular, scalable design
-- ✅ **Problem Statement** - Addresses real-world deepfake threats
-- ✅ **Implementation** - Production-ready code quality
-- ✅ **Technology** - Cutting-edge browser APIs
-- ✅ **Documentation** - World-class technical documentation
-- ✅ **Demo** - Interactive, impressive user experience
-- ✅ **Explainability** - Clear reasoning for every detection
+- Explainable AI with evidence-oriented outputs
+- Browser-based client processing
+- Privacy-first media handling
+- Modular analysis workflow
+- Interactive forensic dashboard
+- Open-source development model
 
 ## Quick Links
 
 ::: tip Getting Started
-Ready to dive in? [Read the introduction](/guide/introduction) and follow our [quick start guide](/guide/quick-start).
+Ready to begin? [Read the introduction](/guide/introduction) and follow the [quick start guide](/guide/quick-start).
 :::
 
 - 📖 [Full Documentation](/guide/introduction)
@@ -108,7 +105,3 @@ Ready to dive in? [Read the introduction](/guide/introduction) and follow our [q
 - 🔧 [Installation Guide](/installation/setup)
 - ❓ [FAQ](/faq)
 - 📝 [License](/license)
-
----
-
-**Built with ❤️ for BrainWave 2026 | [MIT License](/license)**
