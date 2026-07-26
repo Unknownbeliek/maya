@@ -114,21 +114,21 @@ A VitePress documentation site with architecture guides, feature references, ins
 
 ## Technology Stack
 
-| Technology | Role | Notes |
-| :--- | :--- | :--- |
-| React 19 | UI framework | Concurrent rendering for responsive analysis feedback |
-| Vite 8 | Build tool and dev server | Fast HMR, ES module-native bundling |
-| Tailwind CSS 4 | Styling | Utility-first; co-located with Vite via plugin |
-| MediaPipe Tasks Vision | Face mesh inference | 468-landmark 3D detection, WebGL backend |
-| ExifReader | EXIF parsing | Reads embedded metadata tags from binary buffers |
-| Lucide React | Icon set | Consistent status indicators across the dashboard |
-| Express 5 | Backend server | Stream proxy and Python subprocess orchestration |
-| yt-dlp-exec | Stream URL extraction | Wraps `yt-dlp` for Node.js, no binary management required |
-| OpenCV (Python) | Video frame capture | Used in server-side AV sync analyzer |
-| Librosa (Python) | Audio RMS extraction | Hop-length aligned to video FPS for accurate correlation |
-| MediaPipe (Python) | Server-side landmarks | Fallback when browser inference is bypassed |
-| VitePress | Documentation | Markdown-based static site with custom theme |
-| Oxlint | Linter | Fast Rust-based linter for frontend JavaScript |
+| Technology             | Role                      | Notes                                                     |
+| :--------------------- | :------------------------ | :-------------------------------------------------------- |
+| React 19               | UI framework              | Concurrent rendering for responsive analysis feedback     |
+| Vite 8                 | Build tool and dev server | Fast HMR, ES module-native bundling                       |
+| Tailwind CSS 4         | Styling                   | Utility-first; co-located with Vite via plugin            |
+| MediaPipe Tasks Vision | Face mesh inference       | 468-landmark 3D detection, WebGL backend                  |
+| ExifReader             | EXIF parsing              | Reads embedded metadata tags from binary buffers          |
+| Lucide React           | Icon set                  | Consistent status indicators across the dashboard         |
+| Express 5              | Backend server            | Stream proxy and Python subprocess orchestration          |
+| yt-dlp-exec            | Stream URL extraction     | Wraps `yt-dlp` for Node.js, no binary management required |
+| OpenCV (Python)        | Video frame capture       | Used in server-side AV sync analyzer                      |
+| Librosa (Python)       | Audio RMS extraction      | Hop-length aligned to video FPS for accurate correlation  |
+| MediaPipe (Python)     | Server-side landmarks     | Fallback when browser inference is bypassed               |
+| VitePress              | Documentation             | Markdown-based static site with custom theme              |
+| Oxlint                 | Linter                    | Fast Rust-based linter for frontend JavaScript            |
 
 ---
 
@@ -166,12 +166,12 @@ maya/
 
 ### Prerequisites
 
-| Requirement | Version | Notes |
-| :--- | :--- | :--- |
-| Node.js | ≥ 18.0.0 | Required for all JavaScript services |
-| npm | ≥ 9.0.0 | |
-| Python | ≥ 3.9 | Optional; required for server-side AV sync only |
-| `opencv-python`, `librosa`, `mediapipe`, `numpy` | Latest | Optional Python dependencies |
+| Requirement                                      | Version  | Notes                                           |
+| :----------------------------------------------- | :------- | :---------------------------------------------- |
+| Node.js                                          | ≥ 18.0.0 | Required for all JavaScript services            |
+| npm                                              | ≥ 9.0.0  |                                                 |
+| Python                                           | ≥ 3.9    | Optional; required for server-side AV sync only |
+| `opencv-python`, `librosa`, `mediapipe`, `numpy` | Latest   | Optional Python dependencies                    |
 
 ### Installation
 
@@ -318,7 +318,7 @@ For bug reports and feature discussions, open a GitHub Issue. Include browser ve
 
 ## License
 
-[MIT License](LICENSE) — Copyright (c) 2026 Raj Kumar
+[MIT License](LICENSE) — Copyright (c) 2026 UNB
 
 ---
 

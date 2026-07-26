@@ -20,7 +20,7 @@ import { classifyMediaInput } from "../utils/forensics/classifier";
 import { buildSamplingPlan } from "../utils/forensics/samplingEngine";
 import { buildEnterpriseReportFields } from "../utils/forensics/reportBuilder";
 import { scoreMediaConsensus } from "../utils/forensics/scoringEngine";
-import { generateForensicReport } from "../utils/forensics/reportGenerator";
+import { generateForensicReport, generateHtmlCertificate } from "../utils/forensics/reportGenerator";
 import { validateMediaUrl, getFallbackMessage } from "../utils/forensics/linkPolicy";
 import { analyzeAudioKinematics } from "../analysis/kinematics";
 import html2canvas from "html2canvas";
@@ -939,36 +939,170 @@ export default function AnalysisPage() {
     setTimeout(() => { if (videoRef.current && report.mediaSrc) videoRef.current.src = report.mediaSrc; }, 100);
   };
 
-  const handleExportReport = async () => {
-    if (!certificateRef.current) return;
-
-    const canvas = await html2canvas(certificateRef.current, {
-      backgroundColor: '#0B132B',
-      scale: 2,
-      useCORS: true,
-    });
-
-    const imgData = canvas.toDataURL('image/png');
-    const pdf = new jsPDF('p', 'pt', 'a4');
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 28;
-    const renderWidth = pageWidth - (margin * 2);
-    const renderHeight = (canvas.height * renderWidth) / canvas.width;
-    let remainingHeight = renderHeight;
-    let position = margin;
-
-    pdf.addImage(imgData, 'PNG', margin, position, renderWidth, renderHeight);
-    remainingHeight -= (pageHeight - margin * 2);
-
-    while (remainingHeight > 0) {
-      pdf.addPage();
-      position = margin - (renderHeight - remainingHeight);
-      pdf.addImage(imgData, 'PNG', margin, position, renderWidth, renderHeight);
-      remainingHeight -= (pageHeight - margin * 2);
+  const downloadBlob = (content, fileName, mimeType) => {
+    try {
+      const blob = (content instanceof Blob)
+        ? content
+        : new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.style.display = "none";
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        if (document.body.contains(a)) document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 2000);
+    } catch (e) {
+      console.error("Download failed:", e);
     }
+  };
 
-    pdf.save(`MAYA_Certificate_${Date.now()}.pdf`);
+  const handleExportHtml = () => {
+    try {
+      const htmlContent = generateHtmlCertificate({
+        score: analysisResult.score,
+        statusText: analysisResult.statusText,
+        sha: analysisResult.sha,
+        flags: analysisResult.flags,
+        verifications: analysisResult.verifications,
+        fileDetails,
+        inputUrl,
+        mediaType,
+        mediaTypeLabel: analysisResult.mediaTypeLabel,
+        samplingStrategy: analysisResult.samplingStrategy,
+        primaryAnomaly: analysisResult.primaryAnomaly,
+        forensicReport: analysisResult.forensicReport,
+      });
+      
+      // Open in preview window
+      const win = window.open("", "_blank");
+      if (win) {
+        win.document.write(htmlContent);
+        win.document.close();
+        win.focus();
+      }
+
+      // Also trigger physical file download
+      downloadBlob(htmlContent, `MAYA_Forensic_Certificate_${Date.now()}.html`, "text/html;charset=utf-8");
+    } catch (e) {
+      setError("Failed to export HTML report.");
+    }
+  };
+
+  const handlePrintReport = () => {
+    try {
+      const htmlContent = generateHtmlCertificate({
+        score: analysisResult.score,
+        statusText: analysisResult.statusText,
+        sha: analysisResult.sha,
+        flags: analysisResult.flags,
+        verifications: analysisResult.verifications,
+        fileDetails,
+        inputUrl,
+        mediaType,
+        mediaTypeLabel: analysisResult.mediaTypeLabel,
+        samplingStrategy: analysisResult.samplingStrategy,
+        primaryAnomaly: analysisResult.primaryAnomaly,
+        forensicReport: analysisResult.forensicReport,
+      });
+      const win = window.open("", "_blank");
+      if (win) {
+        win.document.write(htmlContent);
+        win.document.close();
+        win.focus();
+        setTimeout(() => win.print(), 300);
+      }
+    } catch (e) {
+      setError("Failed to open print window.");
+    }
+  };
+
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  const handleExportPdf = async () => {
+    if (!analysisResult || analysisResult.score === null) return;
+    setIsExportingPdf(true);
+    try {
+      handlePrintReport();
+    } catch (e) {
+      console.warn("PDF export trigger fallback:", e);
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
+
+  const handleExportJson = () => {
+    try {
+      const data = {
+        system: "MAYA Forensic Engine",
+        version: "2.4",
+        exportedAt: new Date().toISOString(),
+        media: {
+          name: fileDetails?.name || inputUrl || "Media",
+          type: mediaType || "unknown",
+          format: fileDetails?.type || mediaType,
+          source: fileDetails?.size || inputUrl || "N/A",
+          sha256: analysisResult.sha || "N/A",
+        },
+        results: {
+          masterScore: analysisResult.score,
+          verdict: analysisResult.forensicReport?.verdict || "N/A",
+          checksSummary: analysisResult.checksSummary,
+          statusText: analysisResult.statusText,
+          samplingStrategy: analysisResult.samplingStrategy,
+          primaryAnomaly: analysisResult.primaryAnomaly,
+        },
+        verifications: (analysisResult.verifications || []).map(v => ({ label: v.label, value: v.value, status: v.status })),
+        diagnostics: analysisResult.diagnostics || [],
+        anomalies: analysisResult.flags || [],
+        narrative: analysisResult.forensicReport?.paragraphs || []
+      };
+
+      const jsonString = JSON.stringify(data, null, 2);
+
+      // Open formatted JSON in new window
+      const win = window.open("", "_blank");
+      if (win) {
+        win.document.write(`<pre style="background:#0B132B;color:#67e8f9;padding:20px;font-family:monospace;font-size:13px;white-space:pre-wrap;">${jsonString.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`);
+        win.document.close();
+        win.focus();
+      }
+
+      // Trigger file download
+      downloadBlob(jsonString, `MAYA_Forensic_Data_${Date.now()}.json`, "application/json;charset=utf-8");
+    } catch (e) {
+      setError("Failed to export JSON file.");
+    }
+  };
+
+  const handleExportCsv = () => {
+    try {
+      const headers = ["Index", "Timestamp (Seconds)", "Time Code", "Anomaly Type", "Detail"];
+      const rows = (analysisResult.flags || []).map((f, i) => [
+        i + 1,
+        f.seconds ?? 0,
+        `"${f.time || '00:00'}"`,
+        `"${(f.label || '').replace(/"/g, '""')}"`,
+        `"${(f.detail || '').replace(/"/g, '""')}"`
+      ]);
+      const csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+
+      // Open formatted CSV preview in new window
+      const win = window.open("", "_blank");
+      if (win) {
+        win.document.write(`<pre style="background:#0B132B;color:#34d399;padding:20px;font-family:monospace;font-size:13px;white-space:pre-wrap;">${csvContent.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`);
+        win.document.close();
+        win.focus();
+      }
+
+      // Trigger file download
+      downloadBlob(csvContent, `MAYA_Anomaly_Timeline_${Date.now()}.csv`, "text/csv;charset=utf-8");
+    } catch (e) {
+      setError("Failed to export CSV file.");
+    }
   };
 
   // Computed metrics
@@ -1023,11 +1157,26 @@ export default function AnalysisPage() {
         <div className="space-y-2">
           <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
             <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
-            Demo UI. Final product algorithms will differ.
+            This is an Demo UI. Final product algorithms will differ.   
+          </div>
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
+            <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
+            Export: Is not currently able to provide you with pdf file . kindly Use Print option to save the file.
+          </div>
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
+            <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
+            This website doent provides any guarantee of the authenticity of the media file. and is still under active development if any error found kindly report it to the developer.
           </div>
           <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
             <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
                Currently Not Optimized for Smaller/mobile view kindly open it in dekstop view ! 
+          </div>
+          <div className="px-2 py-2 bg-slate-900/60 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-400">
+            <div className="flex items-center gap-1.5 mb-0.5 text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Privacy  </span>
+            </div>
+            <div className="text-[10px] text-slate-500">No file is shared to anywhere ,all processing is done in your browser </div>
           </div>
           <div className="px-2 py-2 bg-slate-900/60 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-400">
             <div className="flex items-center gap-1.5 mb-0.5 text-emerald-400">
@@ -1075,8 +1224,9 @@ export default function AnalysisPage() {
               <button onClick={() => setShowHistoryModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer">
                 <History className="h-3.5 w-3.5 text-indigo-400" /> History ({savedReports.length})
               </button>
-              <button onClick={handleExportReport} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-xl transition-all cursor-pointer ${isExportReady ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 shadow-cyan-500/50 scale-105' : 'bg-cyan-700 hover:bg-cyan-600 opacity-60'}`} disabled={!isExportReady} title="Export your forensic analysis certificate">
-                <Download className="h-4 w-4" /> Export Certificate
+              <button onClick={handleExportPdf} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-xl transition-all cursor-pointer ${isExportReady ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 shadow-cyan-500/50 scale-105' : 'bg-cyan-700 hover:bg-cyan-600 opacity-60'}`} disabled={!isExportReady || isExportingPdf} title="Export your forensic analysis certificate">
+                {isExportingPdf ? <Loader2 className="h-4 w-4 animate-spin text-cyan-200" /> : <Download className="h-4 w-4" />}
+                {isExportingPdf ? 'Exporting...' : 'Export Certificate'}
               </button>
             </div>
           </div>
@@ -1101,8 +1251,9 @@ export default function AnalysisPage() {
           {isExportReady && (
             <div className="bg-emerald-500/15 border border-emerald-500/40 rounded-lg p-4 flex items-center justify-between text-sm text-emerald-100 font-mono">
               <div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-emerald-400" /><span>✓ Analysis complete! Your forensic report is ready.</span></div>
-              <button onClick={handleExportReport} className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded font-semibold text-xs transition-colors cursor-pointer flex items-center gap-1">
-                <Download className="h-3.5 w-3.5" /> Export Now
+              <button onClick={handleExportPdf} disabled={isExportingPdf} className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded font-semibold text-xs transition-colors cursor-pointer flex items-center gap-1">
+                {isExportingPdf ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                {isExportingPdf ? 'Exporting...' : 'Export Now'}
               </button>
             </div>
           )}
@@ -1324,7 +1475,7 @@ export default function AnalysisPage() {
         </div>
       </main>
 
-      <div ref={certificateRef} className="fixed left-[-10000px] top-0 w-[800px] bg-[#0B132B] text-slate-100 p-8 space-y-5">
+      <div ref={certificateRef} style={{ position: 'fixed', top: 0, left: 0, opacity: 0, pointerEvents: 'none', zIndex: -9999, width: '800px', backgroundColor: '#0B132B', color: '#f1f5f9', padding: '32px' }} className="space-y-5 font-sans">
         <div className="flex items-center justify-between border-b border-slate-800 pb-4">
           <div>
             <div className="text-2xl font-black tracking-wide text-cyan-300">MAYA Forensic Certificate</div>
@@ -1342,20 +1493,27 @@ export default function AnalysisPage() {
           <div className="rounded border border-slate-800 bg-slate-900/60 p-3"><span className="text-slate-500">Checks:</span> <span className="text-slate-200">{analysisResult.checksSummary || 'N/A'}</span></div>
         </div>
         <div className="space-y-2">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">Narrative</div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Narrative</div>
           {analysisResult.forensicReport?.paragraphs?.map((paragraph) => (
             <p key={paragraph.slice(0, 24)} className="text-[12px] leading-relaxed text-slate-200 whitespace-pre-line">{paragraph}</p>
           ))}
         </div>
         <div className="space-y-2">
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">Anomaly Heatmap</div>
-          <TimelineScrubber
-            duration={samplingPlan?.totalDuration || videoRef.current?.duration || 0}
-            segments={samplingPlan?.segments || []}
-            anomalyBadges={samplingPlan?.anomalyBadges || []}
-            currentTime={playheadTime}
-            onSeek={() => {}}
-          />
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 font-mono">Flagged Anomalies ({analysisResult.flags?.length || 0})</div>
+          {analysisResult.flags?.length > 0 ? (
+            <div className="space-y-1 bg-slate-900/80 p-3 rounded border border-slate-800 font-mono text-[11px]">
+              {analysisResult.flags.map((f, i) => (
+                <div key={i} className="flex justify-between text-amber-300 py-0.5">
+                  <span>[{f.time || '00:00'}] {f.label}</span>
+                  <span className="text-slate-400">{f.detail || ''}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 p-3 rounded font-mono text-[11px]">
+              ✓ Zero forensic anomalies detected.
+            </div>
+          )}
         </div>
       </div>
 
@@ -1403,7 +1561,12 @@ export default function AnalysisPage() {
       <C2PAExportModal
         isOpen={showReportModal}
         onClose={() => setShowReportModal(false)}
-        onExport={handleExportReport}
+        onExportHtml={handleExportHtml}
+        onPrint={handlePrintReport}
+        onExportPdf={handleExportPdf}
+        onExportJson={handleExportJson}
+        onExportCsv={handleExportCsv}
+        isExportingPdf={isExportingPdf}
         score={analysisResult.score}
         statusText={analysisResult.statusText}
         sha={analysisResult.sha}

@@ -14,7 +14,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "exifreader": "^4.41.3",
     "html2canvas": "^1.4.1",
-    "jspdf": "^3.0.4",
+    "jspdf": "^4.2.1",
     "lucide-react": "^1.26.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
