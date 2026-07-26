@@ -234,13 +234,14 @@ export default function AnalysisPage() {
     setAnalysisStep("Finalizing MAYA Scorecard...");
     captureVideoThumbnail();
 
-    const { sha, meta, audioFlags } = analysisData.current;
-    const metadataPayload = ytMetadata ? {
-      title: ytMetadata.title || '',
-      description: ytMetadata.description || '',
-      channel: ytMetadata.channel || '',
-      tags: ytMetadata.tags || [],
-      url: inputUrl || ytMetadata.url || '',
+    const { sha, meta, audioFlags, ytMetadata: refYtMeta } = analysisData.current;
+    const activeYtMetadata = refYtMeta || ytMetadata;
+    const metadataPayload = activeYtMetadata ? {
+      title: activeYtMetadata.title || '',
+      description: activeYtMetadata.description || '',
+      channel: activeYtMetadata.channel || '',
+      tags: activeYtMetadata.tags || [],
+      url: inputUrl || activeYtMetadata.url || '',
       filename: '',
     } : {
       title: fileDetails?.name || '',
@@ -264,17 +265,23 @@ export default function AnalysisPage() {
       ...(analysisData.current.meshMetrics || {})
     };
 
-    const scoreResult = computeMasterForensicScore({ metadataRes, facialMetrics, audioMetrics });
+    const avSyncMetrics = pythonAvSync || {};
+    const scoreResult = computeMasterForensicScore({ metadataRes, facialMetrics, audioMetrics, avSyncMetrics });
     const score = scoreResult.masterScore;
     // Human-readable score breakdown for export certificate + Scorecard tooltip
     const breakdownParts = [];
-    if (metadataRes.hardCap < 100) breakdownParts.push(`Metadata cap: ${metadataRes.hardCap}%`);
+    if (score <= 5 && metadataRes.isSyntheticMetadata && (audioMetrics.hasTtsAudioSignature || facialMetrics.hasUnnaturalMeshSmoothing)) {
+      breakdownParts.push('Multi-signal cumulative cap: 5% (Critical)');
+    } else if (metadataRes.hardCap < 100) {
+      breakdownParts.push(`Metadata cap: ${metadataRes.hardCap}%`);
+    }
     if (!facialMetrics.isFacelessMedia) {
       if (facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter) breakdownParts.push('Facial jitter: −40');
       if (facialMetrics.hasZeroBlinkRate) breakdownParts.push('Blink: −25');
     }
     if (audioMetrics.hasTtsAudioSignature) breakdownParts.push('TTS audio: −25');
     if (audioMetrics.hasAbruptDecibelSpikes) breakdownParts.push('Splice: −10');
+    if (avSyncMetrics.correlation_score !== undefined && avSyncMetrics.correlation_score < 70) breakdownParts.push('AV-Sync desync: −20');
     if (breakdownParts.length === 0) breakdownParts.push('No penalties — all layers clear');
     const scoreBreakdown = breakdownParts.join(' · ');
 
@@ -594,9 +601,12 @@ export default function AnalysisPage() {
 
         if (data.metadata) {
           setYtMetadata(data.metadata);
+          analysisData.current.ytMetadata = data.metadata;
           const metadataRes = analyzeMetadataFirewall(data.metadata);
           if (metadataRes.isSyntheticMetadata || urlMetadataRes.isSyntheticMetadata) {
-            setNlpMetadataResult(metadataRes.isSyntheticMetadata ? metadataRes : urlMetadataRes);
+            const chosen = metadataRes.isSyntheticMetadata ? metadataRes : urlMetadataRes;
+            setNlpMetadataResult(chosen);
+            analysisData.current.nlpMetadataResult = chosen;
           }
           if (data.metadata.duration > 180) setIsLongVideo(true);
         }
@@ -622,12 +632,14 @@ export default function AnalysisPage() {
             // Store as ytMetadata so finalizeAnalysis can scan it
             const oEmbedMeta = { title, channel, description: '', tags: [], url: inputUrl };
             setYtMetadata(oEmbedMeta);
+            analysisData.current.ytMetadata = oEmbedMeta;
             setFileDetails({ name: title || inputUrl, size: `Channel: ${channel}`, type: 'YouTube Web Stream' });
 
             // Immediately run the metadata firewall so the red banner appears right away
             const metadataRes = analyzeMetadataFirewall(oEmbedMeta);
             if (metadataRes.isSyntheticMetadata) {
               setNlpMetadataResult(metadataRes);
+              analysisData.current.nlpMetadataResult = metadataRes;
             }
           } else {
             setFileDetails({ name: inputUrl, size: 'YouTube', type: 'YouTube Web Stream' });
@@ -872,8 +884,16 @@ export default function AnalysisPage() {
           )}
           {nlpMetadataResult?.isSyntheticMetadata && (
             <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 flex items-center justify-between text-xs text-red-200 font-mono">
-              <div className="flex items-center gap-2.5"><ShieldAlert className="h-4 w-4 text-red-400" /><span>Synthetic Title/Metadata Marker Detected: "{nlpMetadataResult.matchedKeywords[0]}" (-60 pts)</span></div>
-              <span className="text-[10px] text-red-300 font-semibold bg-red-500/20 px-2 py-0.5 rounded border border-red-500/30">High Threat Flag</span>
+              <div className="flex items-center gap-2.5">
+                <ShieldAlert className="h-4 w-4 text-red-400" />
+                <span>
+                  Synthetic Title/Metadata Marker Detected: "{nlpMetadataResult.matchedKeywords[0]}"
+                  {nlpMetadataResult.hardCap <= 15 ? ' (Hard Capped ≤ 15%)' : ' (Hard Capped ≤ 40%)'}
+                </span>
+              </div>
+              <span className="text-[10px] text-red-300 font-semibold bg-red-500/20 px-2 py-0.5 rounded border border-red-500/30">
+                {nlpMetadataResult.hardCap <= 15 ? 'High Threat Flag' : 'Medium-High Threat Flag'}
+              </span>
             </div>
           )}
           {isAnalyzing && (
