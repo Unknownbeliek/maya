@@ -36,7 +36,13 @@ function getRiskLevel(score) {
   };
 }
 
-export default function Scorecard({ score, statusText, mediaType, checksSummary, scoreBreakdown }) {
+const badgeStyles = {
+  green: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  yellow: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  red: 'bg-red-500/15 text-red-300 border-red-500/30',
+};
+
+export default function Scorecard({ score, statusText, mediaType, checksSummary, diagnosticBadges = [] }) {
   const risk = getRiskLevel(score);
   const Icon = risk.icon;
   const arcPct = score !== null ? score : 0;
@@ -90,14 +96,13 @@ export default function Scorecard({ score, statusText, mediaType, checksSummary,
         {statusText || 'Awaiting analysis.'}
       </p>
 
-      {/* Score breakdown — shows which layer deducted points */}
-      {scoreBreakdown && scoreBreakdown !== 'No penalties — all layers clear' && (
-        <div className="text-[10px] font-mono text-slate-500 bg-slate-900/60 border border-slate-800 rounded px-2.5 py-1.5 space-y-0.5">
-          <div className="text-slate-600 uppercase tracking-wider text-[9px] mb-1">Score Deductions</div>
-          {scoreBreakdown.split(' · ').map((part, i) => (
-            <div key={i} className="flex items-center gap-1.5">
-              <span className="text-red-400/70">▼</span>
-              <span>{part}</span>
+      {/* Clean diagnostic badges */}
+      {diagnosticBadges.length > 0 && (
+        <div className="grid grid-cols-1 gap-2">
+          {diagnosticBadges.map((badge) => (
+            <div key={badge.label} className={`text-[10px] font-mono border rounded px-2.5 py-1.5 ${badgeStyles[badge.tone] || badgeStyles.yellow}`}>
+              <div className="uppercase tracking-wider text-[9px] opacity-80">{badge.layer}</div>
+              <div>{badge.label}</div>
             </div>
           ))}
         </div>

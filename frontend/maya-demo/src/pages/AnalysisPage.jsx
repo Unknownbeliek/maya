@@ -12,12 +12,19 @@ import {
 import { useFaceMesh } from "../hooks/useFaceMesh";
 
 // Utilities
-import { classifyMediaType, isYouTubeUrl, extractYouTubeId, getFormatLabel } from "../utils/mediaHelpers";
+import { classifyMediaType, extractYouTubeId, getFormatLabel } from "../utils/mediaHelpers";
 import { calculateFileHash } from "../utils/forensics/sha256";
 import { extractFileMetadata } from "../utils/forensics/exifParser";
-import { analyzeMetadataNLP } from "../utils/forensics/nlpChecker";
-import { analyzeMetadataFirewall, computeMasterForensicScore } from "../utils/forensics/fileAnalyzer";
+import { analyzeMetadataFirewall } from "../utils/forensics/fileAnalyzer";
+import { classifyMediaInput } from "../utils/forensics/classifier";
+import { buildSamplingPlan } from "../utils/forensics/samplingEngine";
+import { buildEnterpriseReportFields } from "../utils/forensics/reportBuilder";
+import { scoreMediaConsensus } from "../utils/forensics/scoringEngine";
+import { generateForensicReport } from "../utils/forensics/reportGenerator";
+import { validateMediaUrl, getFallbackMessage } from "../utils/forensics/linkPolicy";
 import { analyzeAudioKinematics } from "../analysis/kinematics";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
 
 // Components
 import YouTubeEmbed from "../components/media/YouTubeEmbed";
@@ -27,7 +34,8 @@ import Scorecard from "../components/dashboard/Scorecard";
 import MetadataPanel from "../components/dashboard/MetadataPanel";
 import AttributionCard from "../components/dashboard/AttributionCard";
 import C2PAExportModal from "../components/reports/C2PAExportModal";
-import TimeSeriesChart from "../components/charts/TimeSeriesChart";
+import TimelineScrubber from "../components/dashboard/TimelineScrubber";
+import LinkFallbackCard from "../components/dashboard/LinkFallbackCard";
 
 const BACKEND_URL = "http://localhost:3001";
 
@@ -54,6 +62,10 @@ export default function AnalysisPage() {
   const [exifData, setExifData] = useState(null);
   const [mediaResolution, setMediaResolution] = useState(null);
   const [mediaSampleRate, setMediaSampleRate] = useState(null);
+  const [mediaProfile, setMediaProfile] = useState(null);
+  const [samplingPlan, setSamplingPlan] = useState(null);
+  const [playheadTime, setPlayheadTime] = useState(0);
+  const [linkFailure, setLinkFailure] = useState(null);
 
   // Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -61,7 +73,6 @@ export default function AnalysisPage() {
   const [error, setError] = useState(null);
   const [facialAnomalies, setFacialAnomalies] = useState([]);
   const [liveLipSync, setLiveLipSync] = useState({ mar: 0, audioVolume: 0 });
-  const [timeSeriesData, setTimeSeriesData] = useState([]);
   const [pythonAvSync, setPythonAvSync] = useState(null);
 
   // History & UI
@@ -69,8 +80,9 @@ export default function AnalysisPage() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState(false);
+  const certificateRef = useRef(null);
 
-  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null });
+  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: null, samplingPlan: null, duration: 0 });
   const analysisTimeoutRef = useRef(null);
   const [isMobileView, setIsMobileView] = useState(false);
 
@@ -89,24 +101,42 @@ export default function AnalysisPage() {
     }
     if (duration <= 0) return;
 
-    // 5-point smart sampling: 0%, 25%, 50%, 75%, 95%
-    // Catches: opening (intro cards), first-quarter, midpoint, third-quarter, near-end
-    const rawSegments = [0, 0.25, 0.50, 0.75, 0.95].map(pct => Math.floor(duration * pct));
-    // Deduplicate segments closer than 2s apart (short videos)
-    const segments = rawSegments.filter((t, idx, arr) => idx === 0 || t > arr[idx - 1] + 2);
+    const previewPlan = buildSamplingPlan({
+      duration,
+      flags: (analysisData.current.audioFlags || []).map((flag, index) => ({
+        ...flag,
+        seconds: flag.seconds ?? index * 10,
+      })),
+      mediaLabel: mediaProfile?.displayLabel || (mediaType || 'video'),
+    });
 
-    for (let index = 0; index < segments.length; index += 1) {
-      const time = segments[index];
-      setAnalysisStep(`3/3: Smart sampling segment ${index + 1}/${segments.length} @ ${Math.floor(time)}s (${Math.round((time / duration) * 100)}%)...`);
+    for (let index = 0; index < previewPlan.macroScanPoints.length; index += 1) {
+      const time = previewPlan.macroScanPoints[index];
+      setAnalysisStep(`1/3: Macro scan ${index + 1}/${previewPlan.macroScanPoints.length} @ ${Math.floor(time)}s across ${previewPlan.durationLabel}...`);
       try {
         video.currentTime = time;
         await video.play().catch(() => {});
       } catch (e) {
-        console.warn('Smart sampling seek/play failed:', e.message);
+        console.warn('Macro scan seek/play failed:', e.message);
       }
-      await sleep(3200);
+      await sleep(1100);
       video.pause();
-      await sleep(250);
+      await sleep(150);
+    }
+
+    if (previewPlan.hotZones.length > 0) {
+      for (let zoneIndex = 0; zoneIndex < previewPlan.hotZones.length; zoneIndex += 1) {
+        const zone = previewPlan.hotZones[zoneIndex];
+        const scanStart = Math.max(0, zone.start);
+        const scanEnd = Math.max(scanStart + 1, Math.min(duration, zone.end));
+        setAnalysisStep(`2/3: Hot zone micro scan ${zoneIndex + 1}/${previewPlan.hotZones.length} @ ${previewPlan.anomalyBadges[zoneIndex]?.label || `${Math.floor(scanStart)}s`}...`);
+        for (let time = scanStart; time <= scanEnd; time += 1 / previewPlan.microScanCadence) {
+          video.currentTime = Math.min(duration, time);
+          await sleep(16);
+        }
+        video.pause();
+        await sleep(120);
+      }
     }
   };
 
@@ -195,13 +225,12 @@ export default function AnalysisPage() {
     if (fa) setFacialAnomalies(fa);
     if (ls) {
       setLiveLipSync(ls);
-      setTimeSeriesData(prev => [...prev, { mar: ls.mar || 0, audio: ls.audioVolume || 0 }].slice(-40));
     }
     if (mm) analysisData.current.meshMetrics = mm;
   }, []);
 
   // Only activate FaceMesh for video media
-  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing && mediaType === 'video');
+  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing && mediaType === 'video' && (mediaProfile?.shouldUseFaceMesh ?? true));
 
   useEffect(() => { if (error) { const t = setTimeout(() => setError(null), 5000); return () => clearTimeout(t); } }, [error]);
 
@@ -212,10 +241,12 @@ export default function AnalysisPage() {
     setMediaSrc(null); setMediaType(null); setYoutubeId(null);
     setFileDetails(null); setThumbnailUrl(null);
     setIsAnalyzing(false); setAnalysisStep(""); setEstimatedTime(null);
-    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setFacialAnomalies([]); setPythonAvSync(null);
     setIsFacelessMode(false); setIsLongVideo(false);
     setAudioAiResult(null); setYtMetadata(null); setNlpMetadataResult(null);
     setExifData(null); setMediaResolution(null); setMediaSampleRate(null);
+    setMediaProfile(null); setSamplingPlan(null); setPlayheadTime(0); setLinkFailure(null);
+    analysisData.current = { sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: null, samplingPlan: null, duration: 0 };
     setAnalysisResult({
       score: null,
       statusText: "Awaiting media upload. Drop a video, image, or audio file — or paste a URL to begin.",
@@ -253,6 +284,18 @@ export default function AnalysisPage() {
     };
 
     const metadataRes = analyzeMetadataFirewall(metadataPayload);
+    const urlMetadataRes = nlpMetadataResult?.isSyntheticMetadata ? nlpMetadataResult : null;
+    const effectiveMetadataRes = urlMetadataRes
+      ? {
+          ...metadataRes,
+          isSyntheticMetadata: true,
+          matchedKeywords: [...new Set([...(metadataRes.matchedKeywords || []), ...(urlMetadataRes.matchedKeywords || [])])],
+          highRiskKeywords: [...new Set([...(metadataRes.highRiskKeywords || []), ...(urlMetadataRes.highRiskKeywords || [])])],
+          hardCap: Math.min(metadataRes.hardCap ?? 100, urlMetadataRes.hardCap ?? 100),
+          flags: [...(metadataRes.flags || []), ...(urlMetadataRes.flags || [])],
+          provenanceValue: metadataRes.provenanceValue || urlMetadataRes.provenanceValue,
+        }
+      : metadataRes;
     const audioMetrics = {
       hasTtsAudioSignature: !!audioAiResult?.isSyntheticAudio,
       // Only penalize confirmed splice events, not general amplitude spikes
@@ -266,54 +309,84 @@ export default function AnalysisPage() {
     };
 
     const avSyncMetrics = pythonAvSync || {};
-    const scoreResult = computeMasterForensicScore({ metadataRes, facialMetrics, audioMetrics, avSyncMetrics });
+    const provenanceLayer = {
+      verifiedCount: exifData?.hasExif || exifData?.hasC2PA ? 3 : 1,
+      suspiciousCount: effectiveMetadataRes.isSyntheticMetadata ? 1 : 0,
+      flaggedCount: (effectiveMetadataRes.highRiskKeywords || []).length > 0 ? 1 : 0,
+      text: [effectiveMetadataRes.matchedKeywords || [], metadataPayload.title, metadataPayload.url].flat().join(' '),
+      sha: sha,
+      c2pa: exifData?.hasC2PA ? 'Present' : 'Not detected',
+      exif: exifData?.hasExif ? 'Present' : 'Metadata stripped',
+      summary: effectiveMetadataRes.isSyntheticMetadata ? 'Synthetic metadata markers detected.' : 'Provenance looks consistent.',
+    };
+    const visionLayer = {
+      facesDetected: mediaProfile?.shouldUseFaceMesh === false || mediaType === 'audio' || isFacelessMode ? 0 : 1,
+      verifiedCount: (!facialMetrics.hasUnnaturalMeshSmoothing && !facialMetrics.hasTeleportationJitter && !facialMetrics.hasZeroBlinkRate) ? 3 : 0,
+      suspiciousCount: (facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter) ? 1 : 0,
+      flaggedCount: facialMetrics.hasZeroBlinkRate ? 1 : 0,
+      summary: mediaProfile?.isStylized
+        ? 'Stylized content routed away from face mesh.'
+        : (facialMetrics.hasTeleportationJitter || facialMetrics.hasUnnaturalMeshSmoothing)
+          ? 'Spatial warping detected.'
+          : 'Biometric checks normal.',
+    };
+    const audioLayer = {
+      verifiedCount: !audioMetrics.hasTtsAudioSignature && !audioMetrics.hasAbruptDecibelSpikes ? 3 : 0,
+      suspiciousCount: audioMetrics.hasAbruptDecibelSpikes ? 1 : 0,
+      flaggedCount: audioMetrics.hasTtsAudioSignature ? 1 : 0,
+      summary: audioMetrics.hasTtsAudioSignature
+        ? 'Vocoder / splicing anomaly present.'
+        : audioMetrics.hasAbruptDecibelSpikes
+          ? 'Ambient noise variance noted.'
+          : 'Acoustic sync aligned.',
+    };
+
+    const scoreResult = scoreMediaConsensus({
+      provenance: provenanceLayer,
+      vision: visionLayer,
+      audio: audioLayer,
+      context: {
+        url: inputUrl,
+        title: metadataPayload.title,
+        description: metadataPayload.description,
+        c2paTags: metadataPayload.tags,
+      },
+    });
     const score = scoreResult.masterScore;
-    // Human-readable score breakdown for export certificate + Scorecard tooltip
-    const breakdownParts = [];
-    if (score <= 5 && metadataRes.isSyntheticMetadata && (audioMetrics.hasTtsAudioSignature || facialMetrics.hasUnnaturalMeshSmoothing)) {
-      breakdownParts.push('Multi-signal cumulative cap: 5% (Critical)');
-    } else if (metadataRes.hardCap < 100) {
-      breakdownParts.push(`Metadata cap: ${metadataRes.hardCap}%`);
-    }
-    if (!facialMetrics.isFacelessMedia) {
-      if (facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter) breakdownParts.push('Facial jitter: −40');
-      if (facialMetrics.hasZeroBlinkRate) breakdownParts.push('Blink: −25');
-    }
-    if (audioMetrics.hasTtsAudioSignature) breakdownParts.push('TTS audio: −25');
-    if (audioMetrics.hasAbruptDecibelSpikes) breakdownParts.push('Splice: −10');
-    if (avSyncMetrics.correlation_score !== undefined && avSyncMetrics.correlation_score < 70) breakdownParts.push('AV-Sync desync: −20');
-    if (breakdownParts.length === 0) breakdownParts.push('No penalties — all layers clear');
-    const scoreBreakdown = breakdownParts.join(' · ');
-
-    let facialStatus = "Consistent";
-    if (mediaType === 'audio') {
-      facialStatus = "N/A — Standalone Audio";
-    } else if (mediaType === 'image') {
-      facialStatus = "Spatial Analysis Complete";
-    } else if (isFacelessMode) {
-      facialStatus = "Faceless Media — Facial Check Skipped";
-    } else if (facialMetrics.hasTeleportationJitter) {
-      facialStatus = "Teleportation Jitter Detected";
-    } else if (facialMetrics.hasUnnaturalMeshSmoothing) {
-      facialStatus = "Unnatural Facial Motion";
-    } else if (facialMetrics.hasZeroBlinkRate) {
-      facialStatus = "Zero Blink Rate";
-    } else if (facialAnomalies.length > 0) {
-      const primary = facialAnomalies.find(a => a.type !== "Face Disappeared") || facialAnomalies[0];
-      facialStatus = `${primary.type} Detected`;
-    }
-
-    const activeFlags = metadataRes.flags || [];
-    const newFlags = [
-      ...activeFlags,
+    const combinedFlags = [
+      ...effectiveMetadataRes.flags,
       ...(audioAiResult?.flags || []),
-      // Preserve real audio flag labels ("TTS Vocoder Signature", "Abrupt Volume Splice", etc.)
-      // Only fall back to "Audio Kinematic Event" if label is missing
       ...audioFlags.map(f => ({ ...f, label: f.label || 'Audio Kinematic Event' })),
-      ...(mediaType === 'video' && !isFacelessMode
+      ...(mediaType === 'video' && mediaProfile?.shouldUseFaceMesh !== false
         ? facialAnomalies.map(f => ({ ...f, seconds: f.time, label: f.type, detail: f.detail || '' }))
         : [])
     ];
+    const duration = Number(videoRef.current?.duration || analysisData.current.duration || 0);
+    const derivedSamplingPlan = buildSamplingPlan({
+      duration,
+      flags: combinedFlags,
+      audioSamples: (analysisData.current.audioFlags || []).map((flag, index) => ({
+        seconds: flag.seconds ?? index * 10,
+        db: flag.label === 'Abrupt Volume Splice' ? 1 : flag.label === 'TTS Vocoder Signature' ? 0.9 : 0.1,
+      })),
+      mediaLabel: mediaProfile?.displayLabel || (mediaType || 'video'),
+    });
+    analysisData.current.samplingPlan = derivedSamplingPlan;
+    setSamplingPlan(derivedSamplingPlan);
+    // Human-readable score breakdown for export certificate + Scorecard tooltip
+    const facialStatus = mediaType === 'audio'
+      ? 'N/A — Standalone Audio'
+      : mediaProfile?.isStylized
+        ? 'Inconclusive / Faceless'
+        : facialMetrics.hasTeleportationJitter
+          ? 'Spatial Warping Detected'
+          : facialMetrics.hasUnnaturalMeshSmoothing
+            ? 'Spatial Warping Detected'
+            : facialMetrics.hasZeroBlinkRate
+              ? 'Inconclusive / Faceless'
+              : 'Biometric Consistency: Normal';
+
+    const newFlags = combinedFlags;
     if (pythonAvSync?.desync_events) {
       pythonAvSync.desync_events.forEach(e => {
         if (!newFlags.some(f => f.label === e.type && f.time === e.timestamp)) {
@@ -327,9 +400,9 @@ export default function AnalysisPage() {
     const deductions = [];
 
     // Layer 1: metadata
-    if (metadataRes.isSyntheticMetadata) {
-      const kw = metadataRes.matchedKeywords[0] || 'AI keyword';
-      const isHigh = (metadataRes.highRiskKeywords?.length || 0) > 0;
+    if (effectiveMetadataRes.isSyntheticMetadata) {
+      const kw = effectiveMetadataRes.matchedKeywords[0] || 'AI keyword';
+      const isHigh = (effectiveMetadataRes.highRiskKeywords?.length || 0) > 0;
       deductions.push(
         isHigh
           ? `High-risk AI signal detected in metadata ("${kw}") — score hard-capped.`
@@ -378,15 +451,17 @@ export default function AnalysisPage() {
       statusText = deductions[0] + ' Additionally: ' + deductions.slice(1).join(' ');
     }
 
-    const provenanceValue = metadataRes.provenanceValue || (exifData?.software || 'Provenance appears consistent');
-    const provenanceStatus = metadataRes.isSyntheticMetadata ? 'warning' : 'verified';
-    const layer2Status = facialStatus;
+    const provenanceValue = effectiveMetadataRes.provenanceValue || (exifData?.software || 'Provenance appears consistent');
+    const provenanceStatus = effectiveMetadataRes.isSyntheticMetadata ? 'warning' : 'verified';
+    const layer2Status = mediaProfile?.isStylized
+      ? 'Stylized Content — Face Mesh Disabled'
+      : facialStatus;
     const layer3Status = mediaType === 'image'
       ? 'N/A — Static Image'
-      : (audioAiResult ? `${audioAiResult.status} (${audioAiResult.confidence}%)` : 'Synchronized');
+      : (audioAiResult ? `${audioAiResult.status} (${audioAiResult.confidence}%)` : audioLayer.summary);
 
     const provenanceCheck = !!(exifData?.hasExif || exifData?.hasC2PA || ytMetadata);
-    const metadataCheck = !metadataRes.isSyntheticMetadata;
+    const metadataCheck = !effectiveMetadataRes.isSyntheticMetadata;
     const facialCheck = mediaType === 'audio' || mediaType === 'image' || isFacelessMode
       ? 'N/A'
       : !(facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter || facialMetrics.hasZeroBlinkRate || facialAnomalies.length > 0);
@@ -405,6 +480,28 @@ export default function AnalysisPage() {
     const checksPassed = validChecks.filter((c) => c.result === true).length;
     const checksTotal = validChecks.length;
     const checksSummary = `${checksPassed}/${checksTotal} checks passed`;
+    const reportFields = buildEnterpriseReportFields({
+      mediaProfile,
+      samplingPlan: derivedSamplingPlan,
+      analysisResult: { flags: newFlags },
+    });
+    const forensicReport = generateForensicReport({
+      score,
+      flags: newFlags,
+      mediaType,
+      duration,
+      provenance: {
+        sha,
+        status: provenanceStatus,
+        c2pa: exifData?.hasC2PA ? 'Present' : 'Not detected',
+        exif: exifData?.hasExif ? 'Present' : 'Metadata stripped',
+        summary: provenanceValue,
+        visionSummary: visionLayer.summary,
+        audioSummary: audioLayer.summary,
+      },
+      diagnostics: scoreResult.diagnostics,
+      samplingPlan: derivedSamplingPlan,
+    });
 
     setAnalysisResult({
       score,
@@ -412,7 +509,27 @@ export default function AnalysisPage() {
       sha,
       flags: newFlags,
       checksSummary,
-      scoreBreakdown,
+      mediaTypeLabel: reportFields.mediaTypeIdentified,
+      samplingStrategy: reportFields.samplingStrategyUsed,
+      primaryAnomaly: reportFields.primaryAnomalyFound,
+      forensicReport,
+      diagnostics: [
+        {
+          layer: 'Layer 1 - Provenance',
+          label: effectiveMetadataRes.isSyntheticMetadata ? 'Synthetic Signature Found' : (exifData?.hasExif || exifData?.hasC2PA ? 'Verified C2PA Standard' : 'Metadata Stripped'),
+          tone: effectiveMetadataRes.isSyntheticMetadata ? 'red' : ((exifData?.hasExif || exifData?.hasC2PA) ? 'green' : 'yellow'),
+        },
+        {
+          layer: 'Layer 2 - Vision',
+          label: mediaProfile?.isStylized || mediaType === 'audio' ? 'Inconclusive / Faceless' : ((facialMetrics.hasTeleportationJitter || facialMetrics.hasUnnaturalMeshSmoothing) ? 'Spatial Warping Detected' : 'Biometric Consistency: Normal'),
+          tone: mediaProfile?.isStylized || mediaType === 'audio' ? 'yellow' : ((facialMetrics.hasTeleportationJitter || facialMetrics.hasUnnaturalMeshSmoothing) ? 'red' : 'green'),
+        },
+        {
+          layer: 'Layer 3 - Audio',
+          label: audioMetrics.hasTtsAudioSignature ? 'Vocoder / Splicing Anomaly' : (audioMetrics.hasAbruptDecibelSpikes ? 'Ambient Noise Variance' : 'Acoustic Sync: Aligned'),
+          tone: audioMetrics.hasTtsAudioSignature ? 'red' : (audioMetrics.hasAbruptDecibelSpikes ? 'yellow' : 'green'),
+        },
+      ],
       verifications: [
         {
           label: "EXIF & Provenance",
@@ -435,7 +552,7 @@ export default function AnalysisPage() {
       ]
     });
     setIsAnalyzing(false);
-  }, [facialAnomalies, pythonAvSync, liveLipSync, nlpMetadataResult, audioAiResult, mediaType, isFacelessMode, ytMetadata, fileDetails, inputUrl]);
+  }, [facialAnomalies, pythonAvSync, liveLipSync, nlpMetadataResult, audioAiResult, mediaType, isFacelessMode, ytMetadata, fileDetails, inputUrl, mediaProfile, exifData]);
 
   // Auto-update estimated time countdown
   useEffect(() => {
@@ -452,12 +569,22 @@ export default function AnalysisPage() {
   // ─── TYPE-AWARE ANALYSIS ENGINE ──────────────────────────
   const runAnalysisOnSource = async (source) => {
     setIsAnalyzing(true); setError(null);
-    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setFacialAnomalies([]); setPythonAvSync(null);
     setEstimatedTime(null); // Reset time estimate
-    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Media" }, audioFlags: [], meshMetrics: {}, audioKinematics: null };
+    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Media" }, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: mediaProfile, samplingPlan: null, duration: 0 };
     setAnalysisResult(prev => ({ ...prev, score: null, statusText: "Analysis in progress..." }));
 
     const type = source.mediaType || mediaType || 'video';
+    const profile = classifyMediaInput({
+      file: source.file || null,
+      url: inputUrl || mediaSrc || '',
+      title: fileDetails?.name || '',
+      description: inputUrl || '',
+      mediaType: type,
+      duration: videoRef.current?.duration || 0,
+    });
+    setMediaProfile(profile);
+    analysisData.current.mediaProfile = profile;
 
     // Immediate metadata firewall scan of title & URL
     const immediateNlp = analyzeMetadataFirewall({ title: fileDetails?.name || '', description: inputUrl || '', url: inputUrl });
@@ -550,6 +677,10 @@ export default function AnalysisPage() {
     setMediaSrc(objectUrl);
     setYoutubeId(null);
 
+    const profile = classifyMediaInput({ file, mediaType: type, duration: 0 });
+    setMediaProfile(profile);
+    analysisData.current.mediaProfile = profile;
+
     setFileDetails({
       name: file.name,
       size: (file.size / (1024 * 1024)).toFixed(2) + " MB",
@@ -568,6 +699,17 @@ export default function AnalysisPage() {
     setIsAnalyzing(true);
     setAnalysisStep("Resolving URL & extracting metadata...");
     setError(null);
+    setLinkFailure(null);
+
+    const validation = validateMediaUrl(inputUrl);
+    if (!validation.isValid) {
+      const message = validation.reason || getFallbackMessage();
+      setLinkFailure({ message });
+      setError(message);
+      setIsAnalyzing(false);
+      setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+      return;
+    }
 
     const type = classifyMediaType(null, inputUrl);
     setMediaType(type);
@@ -599,6 +741,16 @@ export default function AnalysisPage() {
         const streamUrl = data.streamUrl || inputUrl;
         setMediaSrc(streamUrl);
 
+        const profile = classifyMediaInput({
+          url: inputUrl,
+          title: data.metadata?.title || '',
+          description: data.metadata?.description || '',
+          mediaType: 'video',
+          duration: data.metadata?.duration || 0,
+        });
+        setMediaProfile(profile);
+        analysisData.current.mediaProfile = profile;
+
         if (data.metadata) {
           setYtMetadata(data.metadata);
           analysisData.current.ytMetadata = data.metadata;
@@ -609,6 +761,15 @@ export default function AnalysisPage() {
             analysisData.current.nlpMetadataResult = chosen;
           }
           if (data.metadata.duration > 180) setIsLongVideo(true);
+        }
+
+        if (!streamUrl || Number(data.metadata?.duration || 0) === 0) {
+          const message = getFallbackMessage();
+          setLinkFailure({ message });
+          setError(message);
+          setIsAnalyzing(false);
+          setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+          return;
         }
 
         setFileDetails({ name: data.metadata?.title || inputUrl, size: data.metadata?.channel ? `Channel: ${data.metadata.channel}` : "YouTube", type: "YouTube Web Stream" });
@@ -633,6 +794,9 @@ export default function AnalysisPage() {
             const oEmbedMeta = { title, channel, description: '', tags: [], url: inputUrl };
             setYtMetadata(oEmbedMeta);
             analysisData.current.ytMetadata = oEmbedMeta;
+            const profile = classifyMediaInput({ url: inputUrl, title, description: '', mediaType: 'video' });
+            setMediaProfile(profile);
+            analysisData.current.mediaProfile = profile;
             setFileDetails({ name: title || inputUrl, size: `Channel: ${channel}`, type: 'YouTube Web Stream' });
 
             // Immediately run the metadata firewall so the red banner appears right away
@@ -641,11 +805,31 @@ export default function AnalysisPage() {
               setNlpMetadataResult(metadataRes);
               analysisData.current.nlpMetadataResult = metadataRes;
             }
+            if (Number(oEmbedData.duration_seconds || 0) === 0) {
+              const message = getFallbackMessage();
+              setLinkFailure({ message });
+              setError(message);
+              setIsAnalyzing(false);
+              setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+              return;
+            }
           } else {
+            const message = getFallbackMessage();
+            setLinkFailure({ message });
             setFileDetails({ name: inputUrl, size: 'YouTube', type: 'YouTube Web Stream' });
+            setError(message);
+            setIsAnalyzing(false);
+            setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+            return;
           }
         } catch (_oEmbedErr) {
+          const message = getFallbackMessage();
+          setLinkFailure({ message });
           setFileDetails({ name: inputUrl, size: 'YouTube', type: 'YouTube Web Stream' });
+          setError(message);
+          setIsAnalyzing(false);
+          setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+          return;
         }
         setTimeout(() => runAnalysisOnSource({ type: 'stream', mediaType: 'youtube' }), 150);
       }
@@ -675,20 +859,38 @@ export default function AnalysisPage() {
       if (!resp.ok) throw new Error(data.error || 'Backend failed.');
 
       const streamUrl = data.streamUrl || inputUrl;
+      if (!streamUrl) {
+        const message = getFallbackMessage();
+        setLinkFailure({ message });
+        setError(message);
+        setIsAnalyzing(false);
+        setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+        return;
+      }
       setMediaSrc(streamUrl);
       setFileDetails({ name: data.metadata?.title || inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
+
+      const profile = classifyMediaInput({
+        url: inputUrl,
+        title: data.metadata?.title || '',
+        description: inputUrl,
+        mediaType: type,
+        duration: data.metadata?.duration || 0,
+      });
+      setMediaProfile(profile);
+      analysisData.current.mediaProfile = profile;
 
       setTimeout(() => {
         if (type === 'video' && videoRef.current) videoRef.current.src = streamUrl;
         runAnalysisOnSource({ type: 'stream', mediaType: type });
       }, 150);
     } catch (err) {
-      setMediaSrc(inputUrl);
-      setFileDetails({ name: inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
-      setTimeout(() => {
-        if (type === 'video' && videoRef.current) videoRef.current.src = inputUrl;
-        runAnalysisOnSource({ type: 'stream', mediaType: type });
-      }, 150);
+      const message = getFallbackMessage();
+      setLinkFailure({ message });
+      setError(message);
+      setIsAnalyzing(false);
+      setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] }));
+      return;
     }
   };
 
@@ -700,8 +902,13 @@ export default function AnalysisPage() {
     const item = {
       id: "REP-" + Date.now(), timestamp: new Date().toLocaleString(),
       fileName: fileDetails?.name || inputUrl || "Media", mediaSrc, fileDetails, thumbnailUrl: thumb, mediaType,
-      score: analysisResult.score ?? 87, statusText: analysisResult.statusText,
-      flags: analysisResult.flags, sha: analysisResult.sha, verifications: analysisResult.verifications, pythonAvSync
+      score: analysisResult.score ?? null, statusText: analysisResult.statusText,
+      flags: analysisResult.flags, sha: analysisResult.sha, verifications: analysisResult.verifications, pythonAvSync,
+      mediaTypeLabel: analysisResult.mediaTypeLabel,
+      samplingStrategy: analysisResult.samplingStrategy,
+      primaryAnomaly: analysisResult.primaryAnomaly,
+      forensicReport: analysisResult.forensicReport,
+      diagnostics: analysisResult.diagnostics,
     };
     const updated = [item, ...savedReports];
     setSavedReports(updated);
@@ -717,28 +924,51 @@ export default function AnalysisPage() {
     if (report.thumbnailUrl) setThumbnailUrl(report.thumbnailUrl);
     if (report.mediaType) setMediaType(report.mediaType);
     if (report.pythonAvSync) setPythonAvSync(report.pythonAvSync);
-    setAnalysisResult({ score: report.score, statusText: report.statusText, sha: report.sha || "N/A", flags: report.flags || [], verifications: report.verifications || analysisResult.verifications });
+    setAnalysisResult({
+      score: report.score,
+      statusText: report.statusText,
+      sha: report.sha || "N/A",
+      flags: report.flags || [],
+      verifications: report.verifications || analysisResult.verifications,
+      mediaTypeLabel: report.mediaTypeLabel,
+      samplingStrategy: report.samplingStrategy,
+      primaryAnomaly: report.primaryAnomaly,
+      forensicReport: report.forensicReport,
+      diagnostics: report.diagnostics || analysisResult.diagnostics,
+    });
     setTimeout(() => { if (videoRef.current && report.mediaSrc) videoRef.current.src = report.mediaSrc; }, 100);
   };
 
-  const handleExportReport = () => {
-    const scoreVal = analysisResult.score !== null ? `${analysisResult.score}%` : "Pending";
-    const fileName = fileDetails?.name || inputUrl || "Media";
-    const dateStr = new Date().toLocaleString();
+  const handleExportReport = async () => {
+    if (!certificateRef.current) return;
 
-    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>MAYA C2PA Certificate - ${fileName}</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;background:#0b132b;color:#e2e8f0;margin:0;padding:40px}.c{max-width:800px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:32px;box-shadow:0 20px 25px -5px rgba(0,0,0,.5)}.h{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #1e293b;padding-bottom:20px;margin-bottom:24px}.logo{font-size:24px;font-weight:900;color:#38bdf8;letter-spacing:1px}.badge{font-size:12px;font-family:monospace;background:rgba(56,189,248,.1);color:#38bdf8;padding:4px 12px;border-radius:6px;border:1px solid rgba(56,189,248,.3)}.st{font-size:14px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;margin-top:24px;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:13px;font-family:monospace}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1e293b}th{color:#64748b;font-weight:600}td{color:#cbd5e1}.f{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;font-family:monospace}.pb{background:#0284c7;color:#fff;font-weight:600;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-top:24px;font-size:13px}@media print{.pb{display:none}body{background:#fff;color:#000;padding:0}.c{background:#fff;border:none;box-shadow:none}}</style></head><body><div class="c"><div class="h"><div><div class="logo">MAYA C2PA CERTIFICATE</div><div style="font-size:12px;color:#64748b;margin-top:4px">Media Type: ${(mediaType || 'video').toUpperCase()}</div></div><div class="badge">${scoreVal} — ${analysisResult.statusText}</div></div>
-<div class="st">Media Metadata</div><table><tr><th>File</th><td>${fileName}</td></tr><tr><th>Date</th><td>${dateStr}</td></tr><tr><th>SHA-256</th><td>${analysisResult.sha}</td></tr><tr><th>Type</th><td>${mediaType}</td></tr><tr><th>Checks</th><td>${analysisResult.checksSummary || 'N/A'}</td></tr></table>
-<div class="st">Multi-Layer Verification</div><table><thead><tr><th>Layer</th><th>Result</th><th>Status</th></tr></thead><tbody>${analysisResult.verifications.map(v => `<tr><td>${v.label}</td><td>${v.value}</td><td style="color:${v.status === 'verified' ? '#10b981' : '#f59e0b'}">${v.status.toUpperCase()}</td></tr>`).join('')}</tbody></table>
-<div class="st">Timestamped Anomalies (${analysisResult.flags.length})</div>${analysisResult.flags.length === 0 ? '<div style="font-size:13px;color:#10b981;font-family:monospace">✓ Zero forensic anomalies.</div>' : analysisResult.flags.map(f => `<div class="f">⚠️ [${f.time}] ${f.label} — ${f.detail || 'Mismatch'}</div>`).join('')}
-<div class="st">Score Breakdown</div><div style="font-family:monospace;color:#cbd5e1;font-size:13px;line-height:1.5">${analysisResult.scoreBreakdown || 'N/A'}</div>
-<button class="pb" onclick="window.print()">Print / Save as PDF</button></div></body></html>`;
+    const canvas = await html2canvas(certificateRef.current, {
+      backgroundColor: '#0B132B',
+      scale: 2,
+      useCORS: true,
+    });
 
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `MAYA_Certificate_${Date.now()}.html`; a.click();
-    URL.revokeObjectURL(url);
+    const imgData = canvas.toDataURL('image/png');
+    const pdf = new jsPDF('p', 'pt', 'a4');
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 28;
+    const renderWidth = pageWidth - (margin * 2);
+    const renderHeight = (canvas.height * renderWidth) / canvas.width;
+    let remainingHeight = renderHeight;
+    let position = margin;
+
+    pdf.addImage(imgData, 'PNG', margin, position, renderWidth, renderHeight);
+    remainingHeight -= (pageHeight - margin * 2);
+
+    while (remainingHeight > 0) {
+      pdf.addPage();
+      position = margin - (renderHeight - remainingHeight);
+      pdf.addImage(imgData, 'PNG', margin, position, renderWidth, renderHeight);
+      remainingHeight -= (pageHeight - margin * 2);
+    }
+
+    pdf.save(`MAYA_Certificate_${Date.now()}.pdf`);
   };
 
   // Computed metrics
@@ -907,12 +1137,19 @@ export default function AnalysisPage() {
               <XCircle className="h-4 w-4 text-red-400" /><span>{error}</span>
             </div>
           )}
+          {linkFailure && (
+            <LinkFallbackCard
+              message={linkFailure.message}
+              onUpload={() => fileInputRef.current?.click()}
+              onRetry={() => { setLinkFailure(null); setInputUrl(''); }}
+            />
+          )}
 
           {/* === TOP ROW: SCORE + MEDIA PREVIEW === */}
           <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-5">
 
             {/* Scorecard */}
-            <Scorecard score={analysisResult.score} statusText={analysisResult.statusText} mediaType={mediaType || 'video'} checksSummary={analysisResult.checksSummary} scoreBreakdown={analysisResult.scoreBreakdown} />
+            <Scorecard score={analysisResult.score} statusText={analysisResult.statusText} mediaType={mediaType || 'video'} checksSummary={analysisResult.checksSummary} diagnosticBadges={analysisResult.diagnostics || []} />
 
             {/* Dynamic Media Preview / Dropzone */}
             <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 flex flex-col justify-between shadow-xl relative min-h-[300px]">
@@ -929,7 +1166,7 @@ export default function AnalysisPage() {
               {mediaSrc || youtubeId ? (
                 <>
                   {/* YOUTUBE */}
-                  {mediaType === 'youtube' && youtubeId && <YouTubeEmbed videoId={youtubeId} />}
+                  {mediaType === 'youtube' && youtubeId && !mediaSrc && <YouTubeEmbed videoId={youtubeId} />}
 
                   {/* IMAGE */}
                   {mediaType === 'image' && <ImageViewer src={mediaSrc} onImageLoad={(dims) => setMediaResolution(dims)} />}
@@ -938,9 +1175,9 @@ export default function AnalysisPage() {
                   {mediaType === 'audio' && <AudioWaveform src={mediaSrc} onAudioLoad={(info) => setMediaSampleRate(info.sampleRate)} />}
 
                   {/* VIDEO */}
-                  {(mediaType === 'video' || (mediaType === 'youtube' && !youtubeId)) && (
+                  {(mediaType === 'video' || mediaType === 'youtube') && mediaSrc && (
                     <div className="rounded-lg overflow-hidden border border-slate-800 bg-black aspect-video relative flex items-center justify-center">
-                      <video ref={videoRef} src={mediaSrc} crossOrigin="anonymous" className="absolute inset-0 h-full w-full object-contain z-10" controls autoPlay loop={!isAnalyzing} onEnded={finalizeAnalysis} onLoadedMetadata={() => { if (videoRef.current?.duration > 180) setIsLongVideo(true); }} onLoadedData={captureVideoThumbnail} />
+                      <video ref={videoRef} src={mediaSrc} crossOrigin="anonymous" className="absolute inset-0 h-full w-full object-contain z-10" controls autoPlay loop={!isAnalyzing} onEnded={finalizeAnalysis} onError={() => { const message = getFallbackMessage(); setLinkFailure({ message }); setError(message); setIsAnalyzing(false); setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] })); }} onTimeUpdate={() => setPlayheadTime(videoRef.current?.currentTime || 0)} onLoadedMetadata={() => { const duration = videoRef.current?.duration || 0; analysisData.current.duration = duration; if (duration > 180) setIsLongVideo(true); if (!duration || Number.isNaN(duration)) { const message = getFallbackMessage(); setLinkFailure({ message }); setError(message); setIsAnalyzing(false); setAnalysisResult(prev => ({ ...prev, score: null, statusText: message, flags: [] })); } }} onLoadedData={captureVideoThumbnail} />
                       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none z-20" />
                     </div>
                   )}
@@ -1005,8 +1242,13 @@ export default function AnalysisPage() {
                 </div>
               </div>
 
-              {/* Mini Chart */}
-              <TimeSeriesChart data={timeSeriesData} title="REAL-TIME TIME SERIES" />
+              <TimelineScrubber
+                duration={samplingPlan?.totalDuration || videoRef.current?.duration || 0}
+                segments={samplingPlan?.segments || []}
+                anomalyBadges={samplingPlan?.anomalyBadges || []}
+                currentTime={playheadTime}
+                onSeek={(seconds) => { if (videoRef.current) videoRef.current.currentTime = seconds; }}
+              />
             </div>
           )}
 
@@ -1046,24 +1288,34 @@ export default function AnalysisPage() {
             />
           </div>
 
-          {/* Flagged Moments */}
-          <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
-            <div className="flex items-center gap-1.5 mb-3"><Clock className="h-3.5 w-3.5 text-slate-500" /><span className="text-[12px] font-medium text-slate-400">Flagged Moments ({analysisResult.flags.length})</span></div>
-            {analysisResult.flags.length === 0 ? (
-              <p className="text-xs text-emerald-300 font-mono flex items-center gap-2 py-1"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> {isAnalyzing ? 'Analysis in progress...' : 'Zero anomalies detected across all layers.'}</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {analysisResult.flags.map((f, i) => (
-                  <button key={i} onClick={() => { if (videoRef.current && f.seconds) videoRef.current.currentTime = f.seconds; }}
-                    className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition-all px-2.5 py-1.5 cursor-pointer">
-                    <span className="text-[11px] font-mono font-bold text-amber-400">{f.time}</span>
-                    <span className="h-3 w-px bg-slate-700" />
-                    <span className="text-[12px] text-slate-200">{f.label}</span>
-                    {f.detail && <span className="text-[11px] font-mono text-amber-400/80">({f.detail})</span>}
-                  </button>
-                ))}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+              <div className="text-[12px] font-medium text-slate-400 mb-2">Final Verdict</div>
+              <div className="space-y-2 text-[12px] font-mono text-slate-300">
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Media Type Identified:</span><span className="text-right">{analysisResult.mediaTypeLabel || mediaProfile?.displayLabel || 'Pending'}</span></div>
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Sampling Strategy Used:</span><span className="text-right">{analysisResult.samplingStrategy || samplingPlan?.strategyLabel || 'Pending'}</span></div>
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Primary Anomaly Found:</span><span className="text-right">{analysisResult.primaryAnomaly || samplingPlan?.primaryAnomaly?.rangeLabel || 'None'}</span></div>
               </div>
-            )}
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+              <div className="flex items-center gap-1.5 mb-3"><Clock className="h-3.5 w-3.5 text-slate-500" /><span className="text-[12px] font-medium text-slate-400">Flagged Moments ({analysisResult.flags.length})</span></div>
+              {analysisResult.flags.length === 0 ? (
+                <p className="text-xs text-emerald-300 font-mono flex items-center gap-2 py-1"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> {isAnalyzing ? 'Analysis in progress...' : 'Zero anomalies detected across all layers.'}</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {analysisResult.flags.map((f, i) => (
+                    <button key={i} onClick={() => { if (videoRef.current && f.seconds) videoRef.current.currentTime = f.seconds; }}
+                      className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition-all px-2.5 py-1.5 cursor-pointer">
+                      <span className="text-[11px] font-mono font-bold text-amber-400">{f.time}</span>
+                      <span className="h-3 w-px bg-slate-700" />
+                      <span className="text-[12px] text-slate-200">{f.label}</span>
+                      {f.detail && <span className="text-[11px] font-mono text-amber-400/80">({f.detail})</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Reverse Source Attribution (score < 75%) */}
@@ -1071,6 +1323,41 @@ export default function AnalysisPage() {
 
         </div>
       </main>
+
+      <div ref={certificateRef} className="fixed left-[-10000px] top-0 w-[800px] bg-[#0B132B] text-slate-100 p-8 space-y-5">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+          <div>
+            <div className="text-2xl font-black tracking-wide text-cyan-300">MAYA Forensic Certificate</div>
+            <div className="text-xs text-slate-400 mt-1">Media Type Identified: {analysisResult.mediaTypeLabel || mediaProfile?.displayLabel || 'Pending'}</div>
+          </div>
+          <div className="rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-right">
+            <div className="text-[10px] uppercase tracking-wider text-cyan-200">Master Score</div>
+            <div className="text-3xl font-black font-mono text-cyan-300">{analysisResult.score !== null ? `${analysisResult.score}%` : 'Pending'}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 text-[11px] font-mono">
+          <div className="rounded border border-slate-800 bg-slate-900/60 p-3"><span className="text-slate-500">SHA-256:</span> <span className="text-slate-200 break-all">{analysisResult.sha}</span></div>
+          <div className="rounded border border-slate-800 bg-slate-900/60 p-3"><span className="text-slate-500">Sampling:</span> <span className="text-slate-200">{analysisResult.samplingStrategy || samplingPlan?.strategyLabel || 'Pending'}</span></div>
+          <div className="rounded border border-slate-800 bg-slate-900/60 p-3"><span className="text-slate-500">Primary Anomaly:</span> <span className="text-slate-200">{analysisResult.primaryAnomaly || samplingPlan?.primaryAnomaly?.rangeLabel || 'None'}</span></div>
+          <div className="rounded border border-slate-800 bg-slate-900/60 p-3"><span className="text-slate-500">Checks:</span> <span className="text-slate-200">{analysisResult.checksSummary || 'N/A'}</span></div>
+        </div>
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500">Narrative</div>
+          {analysisResult.forensicReport?.paragraphs?.map((paragraph) => (
+            <p key={paragraph.slice(0, 24)} className="text-[12px] leading-relaxed text-slate-200 whitespace-pre-line">{paragraph}</p>
+          ))}
+        </div>
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-slate-500">Anomaly Heatmap</div>
+          <TimelineScrubber
+            duration={samplingPlan?.totalDuration || videoRef.current?.duration || 0}
+            segments={samplingPlan?.segments || []}
+            anomalyBadges={samplingPlan?.anomalyBadges || []}
+            currentTime={playheadTime}
+            onSeek={() => {}}
+          />
+        </div>
+      </div>
 
       {/* === MODALS === */}
 
@@ -1128,6 +1415,10 @@ export default function AnalysisPage() {
         audioAiResult={audioAiResult}
         nlpMetadataResult={nlpMetadataResult}
         facialAnomalies={facialAnomalies}
+        mediaTypeLabel={analysisResult.mediaTypeLabel}
+        samplingStrategy={analysisResult.samplingStrategy}
+        primaryAnomaly={analysisResult.primaryAnomaly}
+        forensicReport={analysisResult.forensicReport}
         thumbnailUrl={thumbnailUrl}
       />
 
