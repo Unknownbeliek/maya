@@ -7,6 +7,7 @@ export default function C2PAExportModal({
   score, statusText, sha, flags = [], verifications = [],
   fileDetails, inputUrl, mediaType,
   audioAiResult, nlpMetadataResult, facialAnomalies = [],
+  mediaTypeLabel, samplingStrategy, primaryAnomaly,
   thumbnailUrl,
 }) {
   if (!isOpen) return null;
@@ -60,6 +61,9 @@ export default function C2PAExportModal({
                 ['File / Title', fileName],
                 ['SHA-256', sha],
                 ['Format', fileDetails?.type || mediaType],
+                ['Media Type Identified', mediaTypeLabel],
+                ['Sampling Strategy', samplingStrategy],
+                ['Primary Anomaly', primaryAnomaly],
                 ['Source', fileDetails?.size || inputUrl || 'N/A'],
               ].map(([k, v]) => v && v !== 'N/A' ? (
                 <div key={k} className="flex items-start justify-between px-3 py-2 text-[11px] font-mono gap-3">

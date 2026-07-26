@@ -17,6 +17,9 @@ import { calculateFileHash } from "../utils/forensics/sha256";
 import { extractFileMetadata } from "../utils/forensics/exifParser";
 import { analyzeMetadataNLP } from "../utils/forensics/nlpChecker";
 import { analyzeMetadataFirewall, computeMasterForensicScore } from "../utils/forensics/fileAnalyzer";
+import { classifyMediaInput } from "../utils/forensics/classifier";
+import { buildSamplingPlan } from "../utils/forensics/samplingEngine";
+import { buildEnterpriseReportFields } from "../utils/forensics/reportBuilder";
 import { analyzeAudioKinematics } from "../analysis/kinematics";
 
 // Components
@@ -27,7 +30,7 @@ import Scorecard from "../components/dashboard/Scorecard";
 import MetadataPanel from "../components/dashboard/MetadataPanel";
 import AttributionCard from "../components/dashboard/AttributionCard";
 import C2PAExportModal from "../components/reports/C2PAExportModal";
-import TimeSeriesChart from "../components/charts/TimeSeriesChart";
+import TimelineScrubber from "../components/dashboard/TimelineScrubber";
 
 const BACKEND_URL = "http://localhost:3001";
 
@@ -54,6 +57,9 @@ export default function AnalysisPage() {
   const [exifData, setExifData] = useState(null);
   const [mediaResolution, setMediaResolution] = useState(null);
   const [mediaSampleRate, setMediaSampleRate] = useState(null);
+  const [mediaProfile, setMediaProfile] = useState(null);
+  const [samplingPlan, setSamplingPlan] = useState(null);
+  const [playheadTime, setPlayheadTime] = useState(0);
 
   // Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -61,7 +67,6 @@ export default function AnalysisPage() {
   const [error, setError] = useState(null);
   const [facialAnomalies, setFacialAnomalies] = useState([]);
   const [liveLipSync, setLiveLipSync] = useState({ mar: 0, audioVolume: 0 });
-  const [timeSeriesData, setTimeSeriesData] = useState([]);
   const [pythonAvSync, setPythonAvSync] = useState(null);
 
   // History & UI
@@ -70,7 +75,7 @@ export default function AnalysisPage() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState(false);
 
-  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null });
+  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: null, samplingPlan: null, duration: 0 });
   const analysisTimeoutRef = useRef(null);
   const [isMobileView, setIsMobileView] = useState(false);
 
@@ -89,24 +94,42 @@ export default function AnalysisPage() {
     }
     if (duration <= 0) return;
 
-    // 5-point smart sampling: 0%, 25%, 50%, 75%, 95%
-    // Catches: opening (intro cards), first-quarter, midpoint, third-quarter, near-end
-    const rawSegments = [0, 0.25, 0.50, 0.75, 0.95].map(pct => Math.floor(duration * pct));
-    // Deduplicate segments closer than 2s apart (short videos)
-    const segments = rawSegments.filter((t, idx, arr) => idx === 0 || t > arr[idx - 1] + 2);
+    const previewPlan = buildSamplingPlan({
+      duration,
+      flags: (analysisData.current.audioFlags || []).map((flag, index) => ({
+        ...flag,
+        seconds: flag.seconds ?? index * 10,
+      })),
+      mediaLabel: mediaProfile?.displayLabel || (mediaType || 'video'),
+    });
 
-    for (let index = 0; index < segments.length; index += 1) {
-      const time = segments[index];
-      setAnalysisStep(`3/3: Smart sampling segment ${index + 1}/${segments.length} @ ${Math.floor(time)}s (${Math.round((time / duration) * 100)}%)...`);
+    for (let index = 0; index < previewPlan.macroScanPoints.length; index += 1) {
+      const time = previewPlan.macroScanPoints[index];
+      setAnalysisStep(`1/3: Macro scan ${index + 1}/${previewPlan.macroScanPoints.length} @ ${Math.floor(time)}s across ${previewPlan.durationLabel}...`);
       try {
         video.currentTime = time;
         await video.play().catch(() => {});
       } catch (e) {
-        console.warn('Smart sampling seek/play failed:', e.message);
+        console.warn('Macro scan seek/play failed:', e.message);
       }
-      await sleep(3200);
+      await sleep(1100);
       video.pause();
-      await sleep(250);
+      await sleep(150);
+    }
+
+    if (previewPlan.hotZones.length > 0) {
+      for (let zoneIndex = 0; zoneIndex < previewPlan.hotZones.length; zoneIndex += 1) {
+        const zone = previewPlan.hotZones[zoneIndex];
+        const scanStart = Math.max(0, zone.start);
+        const scanEnd = Math.max(scanStart + 1, Math.min(duration, zone.end));
+        setAnalysisStep(`2/3: Hot zone micro scan ${zoneIndex + 1}/${previewPlan.hotZones.length} @ ${previewPlan.anomalyBadges[zoneIndex]?.label || `${Math.floor(scanStart)}s`}...`);
+        for (let time = scanStart; time <= scanEnd; time += 1 / previewPlan.microScanCadence) {
+          video.currentTime = Math.min(duration, time);
+          await sleep(16);
+        }
+        video.pause();
+        await sleep(120);
+      }
     }
   };
 
@@ -195,13 +218,12 @@ export default function AnalysisPage() {
     if (fa) setFacialAnomalies(fa);
     if (ls) {
       setLiveLipSync(ls);
-      setTimeSeriesData(prev => [...prev, { mar: ls.mar || 0, audio: ls.audioVolume || 0 }].slice(-40));
     }
     if (mm) analysisData.current.meshMetrics = mm;
   }, []);
 
   // Only activate FaceMesh for video media
-  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing && mediaType === 'video');
+  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing && mediaType === 'video' && (mediaProfile?.shouldUseFaceMesh ?? true));
 
   useEffect(() => { if (error) { const t = setTimeout(() => setError(null), 5000); return () => clearTimeout(t); } }, [error]);
 
@@ -212,10 +234,12 @@ export default function AnalysisPage() {
     setMediaSrc(null); setMediaType(null); setYoutubeId(null);
     setFileDetails(null); setThumbnailUrl(null);
     setIsAnalyzing(false); setAnalysisStep(""); setEstimatedTime(null);
-    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setFacialAnomalies([]); setPythonAvSync(null);
     setIsFacelessMode(false); setIsLongVideo(false);
     setAudioAiResult(null); setYtMetadata(null); setNlpMetadataResult(null);
     setExifData(null); setMediaResolution(null); setMediaSampleRate(null);
+    setMediaProfile(null); setSamplingPlan(null); setPlayheadTime(0);
+    analysisData.current = { sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: null, samplingPlan: null, duration: 0 };
     setAnalysisResult({
       score: null,
       statusText: "Awaiting media upload. Drop a video, image, or audio file — or paste a URL to begin.",
@@ -253,6 +277,18 @@ export default function AnalysisPage() {
     };
 
     const metadataRes = analyzeMetadataFirewall(metadataPayload);
+    const urlMetadataRes = nlpMetadataResult?.isSyntheticMetadata ? nlpMetadataResult : null;
+    const effectiveMetadataRes = urlMetadataRes
+      ? {
+          ...metadataRes,
+          isSyntheticMetadata: true,
+          matchedKeywords: [...new Set([...(metadataRes.matchedKeywords || []), ...(urlMetadataRes.matchedKeywords || [])])],
+          highRiskKeywords: [...new Set([...(metadataRes.highRiskKeywords || []), ...(urlMetadataRes.highRiskKeywords || [])])],
+          hardCap: Math.min(metadataRes.hardCap ?? 100, urlMetadataRes.hardCap ?? 100),
+          flags: [...(metadataRes.flags || []), ...(urlMetadataRes.flags || [])],
+          provenanceValue: metadataRes.provenanceValue || urlMetadataRes.provenanceValue,
+        }
+      : metadataRes;
     const audioMetrics = {
       hasTtsAudioSignature: !!audioAiResult?.isSyntheticAudio,
       // Only penalize confirmed splice events, not general amplitude spikes
@@ -266,14 +302,34 @@ export default function AnalysisPage() {
     };
 
     const avSyncMetrics = pythonAvSync || {};
-    const scoreResult = computeMasterForensicScore({ metadataRes, facialMetrics, audioMetrics, avSyncMetrics });
+    const scoreResult = computeMasterForensicScore({ metadataRes: effectiveMetadataRes, facialMetrics, audioMetrics, avSyncMetrics });
     const score = scoreResult.masterScore;
+    const combinedFlags = [
+      ...effectiveMetadataRes.flags,
+      ...(audioAiResult?.flags || []),
+      ...audioFlags.map(f => ({ ...f, label: f.label || 'Audio Kinematic Event' })),
+      ...(mediaType === 'video' && mediaProfile?.shouldUseFaceMesh !== false
+        ? facialAnomalies.map(f => ({ ...f, seconds: f.time, label: f.type, detail: f.detail || '' }))
+        : [])
+    ];
+    const duration = Number(videoRef.current?.duration || analysisData.current.duration || 0);
+    const derivedSamplingPlan = buildSamplingPlan({
+      duration,
+      flags: combinedFlags,
+      audioSamples: (analysisData.current.audioFlags || []).map((flag, index) => ({
+        seconds: flag.seconds ?? index * 10,
+        db: flag.label === 'Abrupt Volume Splice' ? 1 : flag.label === 'TTS Vocoder Signature' ? 0.9 : 0.1,
+      })),
+      mediaLabel: mediaProfile?.displayLabel || (mediaType || 'video'),
+    });
+    analysisData.current.samplingPlan = derivedSamplingPlan;
+    setSamplingPlan(derivedSamplingPlan);
     // Human-readable score breakdown for export certificate + Scorecard tooltip
     const breakdownParts = [];
-    if (score <= 5 && metadataRes.isSyntheticMetadata && (audioMetrics.hasTtsAudioSignature || facialMetrics.hasUnnaturalMeshSmoothing)) {
+    if (score <= 5 && effectiveMetadataRes.isSyntheticMetadata && (audioMetrics.hasTtsAudioSignature || facialMetrics.hasUnnaturalMeshSmoothing)) {
       breakdownParts.push('Multi-signal cumulative cap: 5% (Critical)');
-    } else if (metadataRes.hardCap < 100) {
-      breakdownParts.push(`Metadata cap: ${metadataRes.hardCap}%`);
+    } else if (effectiveMetadataRes.hardCap < 100) {
+      breakdownParts.push(`Metadata cap: ${effectiveMetadataRes.hardCap}%`);
     }
     if (!facialMetrics.isFacelessMedia) {
       if (facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter) breakdownParts.push('Facial jitter: −40');
@@ -303,17 +359,7 @@ export default function AnalysisPage() {
       facialStatus = `${primary.type} Detected`;
     }
 
-    const activeFlags = metadataRes.flags || [];
-    const newFlags = [
-      ...activeFlags,
-      ...(audioAiResult?.flags || []),
-      // Preserve real audio flag labels ("TTS Vocoder Signature", "Abrupt Volume Splice", etc.)
-      // Only fall back to "Audio Kinematic Event" if label is missing
-      ...audioFlags.map(f => ({ ...f, label: f.label || 'Audio Kinematic Event' })),
-      ...(mediaType === 'video' && !isFacelessMode
-        ? facialAnomalies.map(f => ({ ...f, seconds: f.time, label: f.type, detail: f.detail || '' }))
-        : [])
-    ];
+    const newFlags = combinedFlags;
     if (pythonAvSync?.desync_events) {
       pythonAvSync.desync_events.forEach(e => {
         if (!newFlags.some(f => f.label === e.type && f.time === e.timestamp)) {
@@ -327,9 +373,9 @@ export default function AnalysisPage() {
     const deductions = [];
 
     // Layer 1: metadata
-    if (metadataRes.isSyntheticMetadata) {
-      const kw = metadataRes.matchedKeywords[0] || 'AI keyword';
-      const isHigh = (metadataRes.highRiskKeywords?.length || 0) > 0;
+    if (effectiveMetadataRes.isSyntheticMetadata) {
+      const kw = effectiveMetadataRes.matchedKeywords[0] || 'AI keyword';
+      const isHigh = (effectiveMetadataRes.highRiskKeywords?.length || 0) > 0;
       deductions.push(
         isHigh
           ? `High-risk AI signal detected in metadata ("${kw}") — score hard-capped.`
@@ -378,15 +424,17 @@ export default function AnalysisPage() {
       statusText = deductions[0] + ' Additionally: ' + deductions.slice(1).join(' ');
     }
 
-    const provenanceValue = metadataRes.provenanceValue || (exifData?.software || 'Provenance appears consistent');
-    const provenanceStatus = metadataRes.isSyntheticMetadata ? 'warning' : 'verified';
-    const layer2Status = facialStatus;
+    const provenanceValue = effectiveMetadataRes.provenanceValue || (exifData?.software || 'Provenance appears consistent');
+    const provenanceStatus = effectiveMetadataRes.isSyntheticMetadata ? 'warning' : 'verified';
+    const layer2Status = mediaProfile?.isStylized
+      ? 'Stylized Content — Face Mesh Disabled'
+      : facialStatus;
     const layer3Status = mediaType === 'image'
       ? 'N/A — Static Image'
       : (audioAiResult ? `${audioAiResult.status} (${audioAiResult.confidence}%)` : 'Synchronized');
 
     const provenanceCheck = !!(exifData?.hasExif || exifData?.hasC2PA || ytMetadata);
-    const metadataCheck = !metadataRes.isSyntheticMetadata;
+    const metadataCheck = !effectiveMetadataRes.isSyntheticMetadata;
     const facialCheck = mediaType === 'audio' || mediaType === 'image' || isFacelessMode
       ? 'N/A'
       : !(facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter || facialMetrics.hasZeroBlinkRate || facialAnomalies.length > 0);
@@ -405,6 +453,11 @@ export default function AnalysisPage() {
     const checksPassed = validChecks.filter((c) => c.result === true).length;
     const checksTotal = validChecks.length;
     const checksSummary = `${checksPassed}/${checksTotal} checks passed`;
+    const reportFields = buildEnterpriseReportFields({
+      mediaProfile,
+      samplingPlan: derivedSamplingPlan,
+      analysisResult: { flags: newFlags },
+    });
 
     setAnalysisResult({
       score,
@@ -413,6 +466,9 @@ export default function AnalysisPage() {
       flags: newFlags,
       checksSummary,
       scoreBreakdown,
+      mediaTypeLabel: reportFields.mediaTypeIdentified,
+      samplingStrategy: reportFields.samplingStrategyUsed,
+      primaryAnomaly: reportFields.primaryAnomalyFound,
       verifications: [
         {
           label: "EXIF & Provenance",
@@ -452,12 +508,22 @@ export default function AnalysisPage() {
   // ─── TYPE-AWARE ANALYSIS ENGINE ──────────────────────────
   const runAnalysisOnSource = async (source) => {
     setIsAnalyzing(true); setError(null);
-    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setFacialAnomalies([]); setPythonAvSync(null);
     setEstimatedTime(null); // Reset time estimate
-    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Media" }, audioFlags: [], meshMetrics: {}, audioKinematics: null };
+    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Media" }, audioFlags: [], meshMetrics: {}, audioKinematics: null, mediaProfile: mediaProfile, samplingPlan: null, duration: 0 };
     setAnalysisResult(prev => ({ ...prev, score: null, statusText: "Analysis in progress..." }));
 
     const type = source.mediaType || mediaType || 'video';
+    const profile = classifyMediaInput({
+      file: source.file || null,
+      url: inputUrl || mediaSrc || '',
+      title: fileDetails?.name || '',
+      description: inputUrl || '',
+      mediaType: type,
+      duration: videoRef.current?.duration || 0,
+    });
+    setMediaProfile(profile);
+    analysisData.current.mediaProfile = profile;
 
     // Immediate metadata firewall scan of title & URL
     const immediateNlp = analyzeMetadataFirewall({ title: fileDetails?.name || '', description: inputUrl || '', url: inputUrl });
@@ -550,6 +616,10 @@ export default function AnalysisPage() {
     setMediaSrc(objectUrl);
     setYoutubeId(null);
 
+    const profile = classifyMediaInput({ file, mediaType: type, duration: 0 });
+    setMediaProfile(profile);
+    analysisData.current.mediaProfile = profile;
+
     setFileDetails({
       name: file.name,
       size: (file.size / (1024 * 1024)).toFixed(2) + " MB",
@@ -599,6 +669,16 @@ export default function AnalysisPage() {
         const streamUrl = data.streamUrl || inputUrl;
         setMediaSrc(streamUrl);
 
+        const profile = classifyMediaInput({
+          url: inputUrl,
+          title: data.metadata?.title || '',
+          description: data.metadata?.description || '',
+          mediaType: 'video',
+          duration: data.metadata?.duration || 0,
+        });
+        setMediaProfile(profile);
+        analysisData.current.mediaProfile = profile;
+
         if (data.metadata) {
           setYtMetadata(data.metadata);
           analysisData.current.ytMetadata = data.metadata;
@@ -633,6 +713,9 @@ export default function AnalysisPage() {
             const oEmbedMeta = { title, channel, description: '', tags: [], url: inputUrl };
             setYtMetadata(oEmbedMeta);
             analysisData.current.ytMetadata = oEmbedMeta;
+            const profile = classifyMediaInput({ url: inputUrl, title, description: '', mediaType: 'video' });
+            setMediaProfile(profile);
+            analysisData.current.mediaProfile = profile;
             setFileDetails({ name: title || inputUrl, size: `Channel: ${channel}`, type: 'YouTube Web Stream' });
 
             // Immediately run the metadata firewall so the red banner appears right away
@@ -678,6 +761,16 @@ export default function AnalysisPage() {
       setMediaSrc(streamUrl);
       setFileDetails({ name: data.metadata?.title || inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
 
+      const profile = classifyMediaInput({
+        url: inputUrl,
+        title: data.metadata?.title || '',
+        description: inputUrl,
+        mediaType: type,
+        duration: data.metadata?.duration || 0,
+      });
+      setMediaProfile(profile);
+      analysisData.current.mediaProfile = profile;
+
       setTimeout(() => {
         if (type === 'video' && videoRef.current) videoRef.current.src = streamUrl;
         runAnalysisOnSource({ type: 'stream', mediaType: type });
@@ -685,6 +778,11 @@ export default function AnalysisPage() {
     } catch (err) {
       setMediaSrc(inputUrl);
       setFileDetails({ name: inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
+
+      const profile = classifyMediaInput({ url: inputUrl, title: inputUrl, description: inputUrl, mediaType: type });
+      setMediaProfile(profile);
+      analysisData.current.mediaProfile = profile;
+
       setTimeout(() => {
         if (type === 'video' && videoRef.current) videoRef.current.src = inputUrl;
         runAnalysisOnSource({ type: 'stream', mediaType: type });
@@ -701,7 +799,10 @@ export default function AnalysisPage() {
       id: "REP-" + Date.now(), timestamp: new Date().toLocaleString(),
       fileName: fileDetails?.name || inputUrl || "Media", mediaSrc, fileDetails, thumbnailUrl: thumb, mediaType,
       score: analysisResult.score ?? 87, statusText: analysisResult.statusText,
-      flags: analysisResult.flags, sha: analysisResult.sha, verifications: analysisResult.verifications, pythonAvSync
+      flags: analysisResult.flags, sha: analysisResult.sha, verifications: analysisResult.verifications, pythonAvSync,
+      mediaTypeLabel: analysisResult.mediaTypeLabel,
+      samplingStrategy: analysisResult.samplingStrategy,
+      primaryAnomaly: analysisResult.primaryAnomaly,
     };
     const updated = [item, ...savedReports];
     setSavedReports(updated);
@@ -717,7 +818,16 @@ export default function AnalysisPage() {
     if (report.thumbnailUrl) setThumbnailUrl(report.thumbnailUrl);
     if (report.mediaType) setMediaType(report.mediaType);
     if (report.pythonAvSync) setPythonAvSync(report.pythonAvSync);
-    setAnalysisResult({ score: report.score, statusText: report.statusText, sha: report.sha || "N/A", flags: report.flags || [], verifications: report.verifications || analysisResult.verifications });
+    setAnalysisResult({
+      score: report.score,
+      statusText: report.statusText,
+      sha: report.sha || "N/A",
+      flags: report.flags || [],
+      verifications: report.verifications || analysisResult.verifications,
+      mediaTypeLabel: report.mediaTypeLabel,
+      samplingStrategy: report.samplingStrategy,
+      primaryAnomaly: report.primaryAnomaly,
+    });
     setTimeout(() => { if (videoRef.current && report.mediaSrc) videoRef.current.src = report.mediaSrc; }, 100);
   };
 
@@ -725,10 +835,13 @@ export default function AnalysisPage() {
     const scoreVal = analysisResult.score !== null ? `${analysisResult.score}%` : "Pending";
     const fileName = fileDetails?.name || inputUrl || "Media";
     const dateStr = new Date().toLocaleString();
+    const mediaTypeLabel = analysisResult.mediaTypeLabel || mediaProfile?.displayLabel || (mediaType || 'video').toUpperCase();
+    const samplingStrategy = analysisResult.samplingStrategy || samplingPlan?.strategyLabel || 'Direct scan';
+    const primaryAnomaly = analysisResult.primaryAnomaly || samplingPlan?.primaryAnomaly?.rangeLabel || 'None';
 
     const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>MAYA C2PA Certificate - ${fileName}</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;background:#0b132b;color:#e2e8f0;margin:0;padding:40px}.c{max-width:800px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:32px;box-shadow:0 20px 25px -5px rgba(0,0,0,.5)}.h{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #1e293b;padding-bottom:20px;margin-bottom:24px}.logo{font-size:24px;font-weight:900;color:#38bdf8;letter-spacing:1px}.badge{font-size:12px;font-family:monospace;background:rgba(56,189,248,.1);color:#38bdf8;padding:4px 12px;border-radius:6px;border:1px solid rgba(56,189,248,.3)}.st{font-size:14px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;margin-top:24px;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:13px;font-family:monospace}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1e293b}th{color:#64748b;font-weight:600}td{color:#cbd5e1}.f{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;font-family:monospace}.pb{background:#0284c7;color:#fff;font-weight:600;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-top:24px;font-size:13px}@media print{.pb{display:none}body{background:#fff;color:#000;padding:0}.c{background:#fff;border:none;box-shadow:none}}</style></head><body><div class="c"><div class="h"><div><div class="logo">MAYA C2PA CERTIFICATE</div><div style="font-size:12px;color:#64748b;margin-top:4px">Media Type: ${(mediaType || 'video').toUpperCase()}</div></div><div class="badge">${scoreVal} — ${analysisResult.statusText}</div></div>
-<div class="st">Media Metadata</div><table><tr><th>File</th><td>${fileName}</td></tr><tr><th>Date</th><td>${dateStr}</td></tr><tr><th>SHA-256</th><td>${analysisResult.sha}</td></tr><tr><th>Type</th><td>${mediaType}</td></tr><tr><th>Checks</th><td>${analysisResult.checksSummary || 'N/A'}</td></tr></table>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;background:#0b132b;color:#e2e8f0;margin:0;padding:40px}.c{max-width:800px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:32px;box-shadow:0 20px 25px -5px rgba(0,0,0,.5)}.h{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #1e293b;padding-bottom:20px;margin-bottom:24px}.logo{font-size:24px;font-weight:900;color:#38bdf8;letter-spacing:1px}.badge{font-size:12px;font-family:monospace;background:rgba(56,189,248,.1);color:#38bdf8;padding:4px 12px;border-radius:6px;border:1px solid rgba(56,189,248,.3)}.st{font-size:14px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;margin-top:24px;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:13px;font-family:monospace}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1e293b}th{color:#64748b;font-weight:600}td{color:#cbd5e1}.f{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;font-family:monospace}.pb{background:#0284c7;color:#fff;font-weight:600;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-top:24px;font-size:13px}@media print{.pb{display:none}body{background:#fff;color:#000;padding:0}.c{background:#fff;border:none;box-shadow:none}}</style></head><body><div class="c"><div class="h"><div><div class="logo">MAYA C2PA CERTIFICATE</div><div style="font-size:12px;color:#64748b;margin-top:4px">Media Type Identified: ${mediaTypeLabel}</div></div><div class="badge">${scoreVal} — ${analysisResult.statusText}</div></div>
+<div class="st">Media Metadata</div><table><tr><th>File</th><td>${fileName}</td></tr><tr><th>Date</th><td>${dateStr}</td></tr><tr><th>SHA-256</th><td>${analysisResult.sha}</td></tr><tr><th>Original Type</th><td>${mediaType}</td></tr><tr><th>Sampling Strategy</th><td>${samplingStrategy}</td></tr><tr><th>Primary Anomaly</th><td>${primaryAnomaly}</td></tr><tr><th>Checks</th><td>${analysisResult.checksSummary || 'N/A'}</td></tr></table>
 <div class="st">Multi-Layer Verification</div><table><thead><tr><th>Layer</th><th>Result</th><th>Status</th></tr></thead><tbody>${analysisResult.verifications.map(v => `<tr><td>${v.label}</td><td>${v.value}</td><td style="color:${v.status === 'verified' ? '#10b981' : '#f59e0b'}">${v.status.toUpperCase()}</td></tr>`).join('')}</tbody></table>
 <div class="st">Timestamped Anomalies (${analysisResult.flags.length})</div>${analysisResult.flags.length === 0 ? '<div style="font-size:13px;color:#10b981;font-family:monospace">✓ Zero forensic anomalies.</div>' : analysisResult.flags.map(f => `<div class="f">⚠️ [${f.time}] ${f.label} — ${f.detail || 'Mismatch'}</div>`).join('')}
 <div class="st">Score Breakdown</div><div style="font-family:monospace;color:#cbd5e1;font-size:13px;line-height:1.5">${analysisResult.scoreBreakdown || 'N/A'}</div>
@@ -940,7 +1053,7 @@ export default function AnalysisPage() {
                   {/* VIDEO */}
                   {(mediaType === 'video' || (mediaType === 'youtube' && !youtubeId)) && (
                     <div className="rounded-lg overflow-hidden border border-slate-800 bg-black aspect-video relative flex items-center justify-center">
-                      <video ref={videoRef} src={mediaSrc} crossOrigin="anonymous" className="absolute inset-0 h-full w-full object-contain z-10" controls autoPlay loop={!isAnalyzing} onEnded={finalizeAnalysis} onLoadedMetadata={() => { if (videoRef.current?.duration > 180) setIsLongVideo(true); }} onLoadedData={captureVideoThumbnail} />
+                      <video ref={videoRef} src={mediaSrc} crossOrigin="anonymous" className="absolute inset-0 h-full w-full object-contain z-10" controls autoPlay loop={!isAnalyzing} onEnded={finalizeAnalysis} onTimeUpdate={() => setPlayheadTime(videoRef.current?.currentTime || 0)} onLoadedMetadata={() => { if (videoRef.current?.duration > 180) setIsLongVideo(true); analysisData.current.duration = videoRef.current?.duration || 0; }} onLoadedData={captureVideoThumbnail} />
                       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none z-20" />
                     </div>
                   )}
@@ -1005,8 +1118,13 @@ export default function AnalysisPage() {
                 </div>
               </div>
 
-              {/* Mini Chart */}
-              <TimeSeriesChart data={timeSeriesData} title="REAL-TIME TIME SERIES" />
+              <TimelineScrubber
+                duration={samplingPlan?.totalDuration || videoRef.current?.duration || 0}
+                segments={samplingPlan?.segments || []}
+                anomalyBadges={samplingPlan?.anomalyBadges || []}
+                currentTime={playheadTime}
+                onSeek={(seconds) => { if (videoRef.current) videoRef.current.currentTime = seconds; }}
+              />
             </div>
           )}
 
@@ -1046,24 +1164,34 @@ export default function AnalysisPage() {
             />
           </div>
 
-          {/* Flagged Moments */}
-          <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
-            <div className="flex items-center gap-1.5 mb-3"><Clock className="h-3.5 w-3.5 text-slate-500" /><span className="text-[12px] font-medium text-slate-400">Flagged Moments ({analysisResult.flags.length})</span></div>
-            {analysisResult.flags.length === 0 ? (
-              <p className="text-xs text-emerald-300 font-mono flex items-center gap-2 py-1"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> {isAnalyzing ? 'Analysis in progress...' : 'Zero anomalies detected across all layers.'}</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {analysisResult.flags.map((f, i) => (
-                  <button key={i} onClick={() => { if (videoRef.current && f.seconds) videoRef.current.currentTime = f.seconds; }}
-                    className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition-all px-2.5 py-1.5 cursor-pointer">
-                    <span className="text-[11px] font-mono font-bold text-amber-400">{f.time}</span>
-                    <span className="h-3 w-px bg-slate-700" />
-                    <span className="text-[12px] text-slate-200">{f.label}</span>
-                    {f.detail && <span className="text-[11px] font-mono text-amber-400/80">({f.detail})</span>}
-                  </button>
-                ))}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+              <div className="text-[12px] font-medium text-slate-400 mb-2">Final Verdict</div>
+              <div className="space-y-2 text-[12px] font-mono text-slate-300">
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Media Type Identified:</span><span className="text-right">{analysisResult.mediaTypeLabel || mediaProfile?.displayLabel || 'Pending'}</span></div>
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Sampling Strategy Used:</span><span className="text-right">{analysisResult.samplingStrategy || samplingPlan?.strategyLabel || 'Pending'}</span></div>
+                <div className="flex justify-between gap-4"><span className="text-slate-500">Primary Anomaly Found:</span><span className="text-right">{analysisResult.primaryAnomaly || samplingPlan?.primaryAnomaly?.rangeLabel || 'None'}</span></div>
               </div>
-            )}
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+              <div className="flex items-center gap-1.5 mb-3"><Clock className="h-3.5 w-3.5 text-slate-500" /><span className="text-[12px] font-medium text-slate-400">Flagged Moments ({analysisResult.flags.length})</span></div>
+              {analysisResult.flags.length === 0 ? (
+                <p className="text-xs text-emerald-300 font-mono flex items-center gap-2 py-1"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> {isAnalyzing ? 'Analysis in progress...' : 'Zero anomalies detected across all layers.'}</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {analysisResult.flags.map((f, i) => (
+                    <button key={i} onClick={() => { if (videoRef.current && f.seconds) videoRef.current.currentTime = f.seconds; }}
+                      className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition-all px-2.5 py-1.5 cursor-pointer">
+                      <span className="text-[11px] font-mono font-bold text-amber-400">{f.time}</span>
+                      <span className="h-3 w-px bg-slate-700" />
+                      <span className="text-[12px] text-slate-200">{f.label}</span>
+                      {f.detail && <span className="text-[11px] font-mono text-amber-400/80">({f.detail})</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Reverse Source Attribution (score < 75%) */}
@@ -1128,6 +1256,9 @@ export default function AnalysisPage() {
         audioAiResult={audioAiResult}
         nlpMetadataResult={nlpMetadataResult}
         facialAnomalies={facialAnomalies}
+        mediaTypeLabel={analysisResult.mediaTypeLabel}
+        samplingStrategy={analysisResult.samplingStrategy}
+        primaryAnomaly={analysisResult.primaryAnomaly}
         thumbnailUrl={thumbnailUrl}
       />
 
