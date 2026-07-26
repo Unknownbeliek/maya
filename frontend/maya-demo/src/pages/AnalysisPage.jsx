@@ -1,27 +1,59 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { 
-  FileCheck, AudioLines, ScanFace, Clock, Link, Upload, 
-  Loader2, AlertTriangle, CheckCircle2, XCircle, Activity, Mic, Video,
+import {
+  FileCheck, AudioLines, ScanFace, Clock, Link, Upload,
+  Loader2, CheckCircle2, XCircle, Mic, Video,
   LayoutDashboard, BarChart3, FileText, Settings, History, Download,
-  FolderPlus, RefreshCw, Layers, Check, Play, Pause, ChevronRight, Eye,
-  ExternalLink, Printer, Image as ImageIcon, Info, Gauge, Zap
+  FolderPlus, RefreshCw, Play, Pause, Eye,
+  ExternalLink, Image as ImageIcon, Info,
+  ShieldAlert, ShieldCheck
 } from "lucide-react";
+
+// Hooks
 import { useFaceMesh } from "../hooks/useFaceMesh";
-import { calculateFileHash } from "../analysis/hashing";
-import { extractFileMetadata } from "../analysis/metadata";
+
+// Utilities
+import { classifyMediaType, isYouTubeUrl, extractYouTubeId, getFormatLabel } from "../utils/mediaHelpers";
+import { calculateFileHash } from "../utils/forensics/sha256";
+import { extractFileMetadata } from "../utils/forensics/exifParser";
+import { analyzeMetadataNLP } from "../utils/forensics/nlpChecker";
+import { analyzeMetadataFirewall, computeMasterForensicScore } from "../utils/forensics/fileAnalyzer";
 import { analyzeAudioKinematics } from "../analysis/kinematics";
+
+// Components
+import YouTubeEmbed from "../components/media/YouTubeEmbed";
+import ImageViewer from "../components/media/ImageViewer";
+import AudioWaveform from "../components/media/AudioWaveform";
+import Scorecard from "../components/dashboard/Scorecard";
+import MetadataPanel from "../components/dashboard/MetadataPanel";
+import AttributionCard from "../components/dashboard/AttributionCard";
+import C2PAExportModal from "../components/reports/C2PAExportModal";
+import TimeSeriesChart from "../components/charts/TimeSeriesChart";
 
 const BACKEND_URL = "http://localhost:3001";
 
 export default function AnalysisPage() {
   const [activeTab, setActiveTab] = useState("Overview");
-  
-  // Video & File state
-  const [videoSrc, setVideoSrc] = useState(null);
+
+  // Media & File State
+  const [mediaSrc, setMediaSrc] = useState(null);
+  const [mediaType, setMediaType] = useState(null); // 'video' | 'image' | 'audio' | 'youtube'
+  const [youtubeId, setYoutubeId] = useState(null);
   const [fileDetails, setFileDetails] = useState(null);
   const [inputUrl, setInputUrl] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
   const [thumbnailUrl, setThumbnailUrl] = useState(null);
+  const [estimatedTime, setEstimatedTime] = useState(null);
+
+  // Forensic Mode States
+  const [isFacelessMode, setIsFacelessMode] = useState(false);
+  const [isLongVideo, setIsLongVideo] = useState(false);
+  const [smartSampleMode, setSmartSampleMode] = useState(true);
+  const [audioAiResult, setAudioAiResult] = useState(null);
+  const [ytMetadata, setYtMetadata] = useState(null);
+  const [nlpMetadataResult, setNlpMetadataResult] = useState(null);
+  const [exifData, setExifData] = useState(null);
+  const [mediaResolution, setMediaResolution] = useState(null);
+  const [mediaSampleRate, setMediaSampleRate] = useState(null);
 
   // Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -32,25 +64,61 @@ export default function AnalysisPage() {
   const [timeSeriesData, setTimeSeriesData] = useState([]);
   const [pythonAvSync, setPythonAvSync] = useState(null);
 
-  // History & Storage
+  // History & UI
   const [savedReports, setSavedReports] = useState([]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState(false);
 
-  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [] });
+  const analysisData = useRef({ sha: "N/A", meta: {}, audioFlags: [], meshMetrics: {}, audioKinematics: null });
   const analysisTimeoutRef = useRef(null);
+  const [isMobileView, setIsMobileView] = useState(false);
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const runLongVideoSmartSampling = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    let duration = video.duration || 0;
+    let attempts = 0;
+    while ((!duration || Number.isNaN(duration)) && attempts < 10) {
+      await sleep(200);
+      duration = video.duration || 0;
+      attempts += 1;
+    }
+    if (duration <= 0) return;
+
+    // 5-point smart sampling: 0%, 25%, 50%, 75%, 95%
+    // Catches: opening (intro cards), first-quarter, midpoint, third-quarter, near-end
+    const rawSegments = [0, 0.25, 0.50, 0.75, 0.95].map(pct => Math.floor(duration * pct));
+    // Deduplicate segments closer than 2s apart (short videos)
+    const segments = rawSegments.filter((t, idx, arr) => idx === 0 || t > arr[idx - 1] + 2);
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const time = segments[index];
+      setAnalysisStep(`3/3: Smart sampling segment ${index + 1}/${segments.length} @ ${Math.floor(time)}s (${Math.round((time / duration) * 100)}%)...`);
+      try {
+        video.currentTime = time;
+        await video.play().catch(() => {});
+      } catch (e) {
+        console.warn('Smart sampling seek/play failed:', e.message);
+      }
+      await sleep(3200);
+      video.pause();
+      await sleep(250);
+    }
+  };
 
   const [analysisResult, setAnalysisResult] = useState({
     score: null,
-    statusText: "Awaiting video upload. Drop a video file or paste a URL below to begin analysis.",
+    statusText: "Awaiting media upload. Drop a video, image, or audio file — or paste a URL to begin.",
     sha: "N/A",
     flags: [],
     verifications: [
       { label: "EXIF & Provenance", value: "Pending", status: "pending", icon: FileCheck },
-      { label: "Audio-Visual Kinematics", value: "Pending", status: "pending", icon: AudioLines },
-      { label: "Facial Landmark Consistency", value: "Pending", status: "pending", icon: ScanFace },
-      { label: "Python OpenCV+Librosa AV Sync", value: "Pending", status: "pending", icon: Activity },
+      { label: "Spatial & Facial Mesh", value: "Pending", status: "pending", icon: ScanFace },
+      { label: "Audio AI Spectrum", value: "Pending", status: "pending", icon: AudioLines },
     ]
   });
 
@@ -58,152 +126,187 @@ export default function AnalysisPage() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  // Load saved history from localStorage on mount
+  // Load saved history
   useEffect(() => {
     try {
       const stored = localStorage.getItem("deepsync_reports_history");
-      if (stored) {
-        setSavedReports(JSON.parse(stored));
-      }
-    } catch (e) {
-      console.warn("Failed to load history from localStorage", e);
-    }
+      if (stored) setSavedReports(JSON.parse(stored));
+    } catch (e) { /* ignore */ }
   }, []);
 
-  // Robust Video Frame Thumbnail Generator
+  // Clipboard detection & URL persistence on load
+  useEffect(() => {
+    const savedUrl = localStorage.getItem("maya_last_url");
+    if (savedUrl) setInputUrl(savedUrl);
+    
+    // Try to auto-detect clipboard URL (with graceful fallback)
+    navigator.clipboard?.readText()
+      .then(text => {
+        if (!savedUrl && (text.includes('youtube') || text.includes('http'))) {
+          setInputUrl(text);
+          localStorage.setItem("maya_last_url", text);
+        }
+      })
+      .catch(() => {}); // Silently fail if no clipboard permission
+  }, []);
+
+  // Persist URL to localStorage on change
+  useEffect(() => {
+    if (inputUrl) {
+      localStorage.setItem("maya_last_url", inputUrl);
+    }
+  }, [inputUrl]);
+
+  useEffect(() => {
+    const updateMobileView = () => setIsMobileView(window.innerWidth <= 768);
+    updateMobileView();
+    window.addEventListener('resize', updateMobileView);
+    return () => window.removeEventListener('resize', updateMobileView);
+  }, []);
+
+  // Thumbnail capture
   const captureVideoThumbnail = () => {
     if (!videoRef.current) return null;
     try {
       const video = videoRef.current;
       if (!video.videoWidth || !video.videoHeight) return null;
-      
       const canvas = document.createElement("canvas");
       canvas.width = Math.min(video.videoWidth, 480);
       canvas.height = Math.min(video.videoHeight, 270);
       const ctx = canvas.getContext("2d");
-      
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      if (canvasRef.current) {
-        ctx.drawImage(canvasRef.current, 0, 0, canvas.width, canvas.height);
-      }
-
+      if (canvasRef.current) ctx.drawImage(canvasRef.current, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
       setThumbnailUrl(dataUrl);
       return dataUrl;
-    } catch (e) {
-      console.warn("Thumbnail capture skipped:", e.message);
-      return null;
-    }
+    } catch (e) { return null; }
   };
 
   useEffect(() => {
-    if (videoSrc && videoRef.current) {
-      const timer = setTimeout(() => {
-        captureVideoThumbnail();
-      }, 800);
+    if (mediaSrc && videoRef.current && mediaType === 'video') {
+      const timer = setTimeout(() => captureVideoThumbnail(), 800);
       return () => clearTimeout(timer);
     }
-  }, [videoSrc, isAnalyzing]);
+  }, [mediaSrc, isAnalyzing, mediaType]);
 
-  const handleFaceMeshResults = useCallback(({ facialAnomalies, liveLipSync: liveSync }) => {
-    if (facialAnomalies) setFacialAnomalies(facialAnomalies);
-    if (liveSync) {
-      setLiveLipSync(liveSync);
-      setTimeSeriesData(prev => {
-        const next = [...prev, { mar: liveSync.mar || 0, audio: liveSync.audioVolume || 0 }];
-        return next.slice(-40);
-      });
+  // FaceMesh callback (video only)
+  const handleFaceMeshResults = useCallback(({ isFaceless, facialAnomalies: fa, liveLipSync: ls, meshMetrics: mm }) => {
+    if (typeof isFaceless === 'boolean') setIsFacelessMode(isFaceless);
+    if (fa) setFacialAnomalies(fa);
+    if (ls) {
+      setLiveLipSync(ls);
+      setTimeSeriesData(prev => [...prev, { mar: ls.mar || 0, audio: ls.audioVolume || 0 }].slice(-40));
     }
+    if (mm) analysisData.current.meshMetrics = mm;
   }, []);
 
-  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing);
+  // Only activate FaceMesh for video media
+  useFaceMesh(videoRef, canvasRef, handleFaceMeshResults, isAnalyzing && mediaType === 'video');
 
-  useEffect(() => {
-    if (error) {
-      const timer = setTimeout(() => setError(null), 5000);
-      return () => clearTimeout(timer);
-    }
-  }, [error]);
+  useEffect(() => { if (error) { const t = setTimeout(() => setError(null), 5000); return () => clearTimeout(t); } }, [error]);
 
+  // ─── RESET ────────────────────────────────────────────────
   const handleAnalyzeNew = () => {
     if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.src = "";
-    }
-    setVideoSrc(null);
-    setFileDetails(null);
-    setThumbnailUrl(null);
-    setIsAnalyzing(false);
-    setAnalysisStep("");
-    setFacialAnomalies([]);
-    setTimeSeriesData([]);
-    setPythonAvSync(null);
+    if (videoRef.current) { videoRef.current.pause(); videoRef.current.src = ""; }
+    setMediaSrc(null); setMediaType(null); setYoutubeId(null);
+    setFileDetails(null); setThumbnailUrl(null);
+    setIsAnalyzing(false); setAnalysisStep(""); setEstimatedTime(null);
+    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setIsFacelessMode(false); setIsLongVideo(false);
+    setAudioAiResult(null); setYtMetadata(null); setNlpMetadataResult(null);
+    setExifData(null); setMediaResolution(null); setMediaSampleRate(null);
     setAnalysisResult({
       score: null,
-      statusText: "Awaiting video upload. Drop a file or paste a URL to begin.",
-      sha: "N/A",
-      flags: [],
+      statusText: "Awaiting media upload. Drop a video, image, or audio file — or paste a URL to begin.",
+      sha: "N/A", flags: [],
       verifications: [
         { label: "EXIF & Provenance", value: "Pending", status: "pending", icon: FileCheck },
-        { label: "Audio-Visual Kinematics", value: "Pending", status: "pending", icon: AudioLines },
-        { label: "Facial Landmark Consistency", value: "Pending", status: "pending", icon: ScanFace },
-        { label: "Python OpenCV+Librosa AV Sync", value: "Pending", status: "pending", icon: Activity },
+        { label: "Spatial & Facial Mesh", value: "Pending", status: "pending", icon: ScanFace },
+        { label: "Audio AI Spectrum", value: "Pending", status: "pending", icon: AudioLines },
       ]
     });
   };
 
+  // ─── FINALIZE ANALYSIS (Unified Master Formula) ───────────
   const finalizeAnalysis = useCallback(() => {
     if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
+    setAnalysisStep("Finalizing MAYA Scorecard...");
+    captureVideoThumbnail();
 
-    setAnalysisStep("Finalizing score...");
-    const thumb = captureVideoThumbnail();
-
-    let score = 100;
     const { sha, meta, audioFlags } = analysisData.current;
+    const metadataPayload = ytMetadata ? {
+      title: ytMetadata.title || '',
+      description: ytMetadata.description || '',
+      channel: ytMetadata.channel || '',
+      tags: ytMetadata.tags || [],
+      url: inputUrl || ytMetadata.url || '',
+      filename: '',
+    } : {
+      title: fileDetails?.name || '',
+      description: inputUrl || '',
+      channel: '',
+      tags: [],
+      url: inputUrl || '',
+      filename: fileDetails?.name || '',
+    };
+
+    const metadataRes = analyzeMetadataFirewall(metadataPayload);
+    const audioMetrics = {
+      hasTtsAudioSignature: !!audioAiResult?.isSyntheticAudio,
+      // Only penalize confirmed splice events, not general amplitude spikes
+      hasAbruptDecibelSpikes: (analysisData.current.audioFlags || []).some(
+        f => f.label === 'Abrupt Volume Splice'
+      ),
+    };
+    const facialMetrics = {
+      isFacelessMedia: mediaType === 'audio' || isFacelessMode,
+      ...(analysisData.current.meshMetrics || {})
+    };
+
+    const scoreResult = computeMasterForensicScore({ metadataRes, facialMetrics, audioMetrics });
+    const score = scoreResult.masterScore;
+    // Human-readable score breakdown for export certificate + Scorecard tooltip
+    const breakdownParts = [];
+    if (metadataRes.hardCap < 100) breakdownParts.push(`Metadata cap: ${metadataRes.hardCap}%`);
+    if (!facialMetrics.isFacelessMedia) {
+      if (facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter) breakdownParts.push('Facial jitter: −40');
+      if (facialMetrics.hasZeroBlinkRate) breakdownParts.push('Blink: −25');
+    }
+    if (audioMetrics.hasTtsAudioSignature) breakdownParts.push('TTS audio: −25');
+    if (audioMetrics.hasAbruptDecibelSpikes) breakdownParts.push('Splice: −10');
+    if (breakdownParts.length === 0) breakdownParts.push('No penalties — all layers clear');
+    const scoreBreakdown = breakdownParts.join(' · ');
+
     let facialStatus = "Consistent";
-
-    // 1. Audio Kinematics penalty
-    if (audioFlags.length > 0) score -= (audioFlags.length * 15);
-
-    // 2. Python AV Sync & AI Landmark Detection penalty
-    if (pythonAvSync) {
-      if (pythonAvSync.correlation_score < 80) {
-        score -= Math.round((80 - pythonAvSync.correlation_score) * 1.2);
-      }
-      if (pythonAvSync.desync_events && pythonAvSync.desync_events.length > 0) {
-        score -= (pythonAvSync.desync_events.length * 15);
-      }
-    } else {
-      // Streamed YouTube fallback penalty evaluation if MAR vs Audio variance was detected
-      if (liveLipSync.mar > 0.4 && liveLipSync.audioVolume < 0.2) {
-        score -= 25;
-      }
+    if (mediaType === 'audio') {
+      facialStatus = "N/A — Standalone Audio";
+    } else if (mediaType === 'image') {
+      facialStatus = "Spatial Analysis Complete";
+    } else if (isFacelessMode) {
+      facialStatus = "Faceless Media — Facial Check Skipped";
+    } else if (facialMetrics.hasTeleportationJitter) {
+      facialStatus = "Teleportation Jitter Detected";
+    } else if (facialMetrics.hasUnnaturalMeshSmoothing) {
+      facialStatus = "Unnatural Facial Motion";
+    } else if (facialMetrics.hasZeroBlinkRate) {
+      facialStatus = "Zero Blink Rate";
+    } else if (facialAnomalies.length > 0) {
+      const primary = facialAnomalies.find(a => a.type !== "Face Disappeared") || facialAnomalies[0];
+      facialStatus = `${primary.type} Detected`;
     }
 
-    // 3. MediaPipe Facial Anomaly Penalties
-    facialAnomalies.forEach(anomaly => {
-      if (anomaly.type === "Low Blink Rate" || anomaly.type === "AI Generation / Low Blink Rate") score -= 20;
-      if (anomaly.type === "Rigid Head Pose") score -= 15;
-      if (anomaly.type === "Face Disappeared") score -= 10;
-      if (anomaly.type === "Lip-Sync Misalignment" || anomaly.type === "AV Lip-Sync Desync") score -= 25;
-    });
-    
-    if (facialAnomalies.length > 0) {
-        const primaryAnomaly = facialAnomalies.find(a => a.type !== "Face Disappeared") || facialAnomalies[0];
-        facialStatus = `${primaryAnomaly.type} Detected`;
-    } else if (pythonAvSync && pythonAvSync.correlation_score < 75) {
-        facialStatus = pythonAvSync.av_sync_status || "Lip-Sync Anomaly Detected";
-    }
-
-    score = Math.max(score, 0);
-
+    const activeFlags = metadataRes.flags || [];
     const newFlags = [
-      ...audioFlags.map(f => ({...f, label: "Audio Desync"})),
-      ...facialAnomalies.map(f => ({...f, seconds: f.time, label: f.type, detail: f.detail || ''}))
+      ...activeFlags,
+      ...(audioAiResult?.flags || []),
+      // Preserve real audio flag labels ("TTS Vocoder Signature", "Abrupt Volume Splice", etc.)
+      // Only fall back to "Audio Kinematic Event" if label is missing
+      ...audioFlags.map(f => ({ ...f, label: f.label || 'Audio Kinematic Event' })),
+      ...(mediaType === 'video' && !isFacelessMode
+        ? facialAnomalies.map(f => ({ ...f, seconds: f.time, label: f.type, detail: f.detail || '' }))
+        : [])
     ];
-
     if (pythonAvSync?.desync_events) {
       pythonAvSync.desync_events.forEach(e => {
         if (!newFlags.some(f => f.label === e.type && f.time === e.timestamp)) {
@@ -212,301 +315,445 @@ export default function AnalysisPage() {
       });
     }
 
+    // ── Contextual status message: tells the user WHICH layer flagged and WHY ──
+    let statusText = '';
+    const deductions = [];
+
+    // Layer 1: metadata
+    if (metadataRes.isSyntheticMetadata) {
+      const kw = metadataRes.matchedKeywords[0] || 'AI keyword';
+      const isHigh = (metadataRes.highRiskKeywords?.length || 0) > 0;
+      deductions.push(
+        isHigh
+          ? `High-risk AI signal detected in metadata ("${kw}") — score hard-capped.`
+          : `AI-adjacent keyword "${kw}" detected in title/metadata.`
+      );
+    }
+
+    // Layer 3: audio TTS
+    if (audioMetrics.hasTtsAudioSignature) {
+      const conf = audioAiResult?.confidence ?? 0;
+      const flatness = audioAiResult?.spectralFlatness
+        ? ` (spectral flatness: ${(audioAiResult.spectralFlatness * 100).toFixed(0)}%)`
+        : '';
+      deductions.push(`TTS/synthetic audio vocoder signature detected${flatness} — confidence ${conf}%.`);
+    } else if (audioMetrics.hasAbruptDecibelSpikes) {
+      deductions.push('Abrupt audio splice detected — possible laugh-track or dubbed audio injection.');
+    }
+
+    // Layer 2: facial
+    if (!facialMetrics.isFacelessMedia) {
+      if (facialMetrics.hasUnnaturalMeshSmoothing && facialMetrics.hasTeleportationJitter) {
+        deductions.push('AI avatar signature: near-zero Z-depth variance + centroid teleportation detected.');
+      } else if (facialMetrics.hasUnnaturalMeshSmoothing) {
+        deductions.push('Unnatural facial mesh smoothing (σ < 0.0008) — consistent with diffusion model avatar.');
+      } else if (facialMetrics.hasTeleportationJitter) {
+        deductions.push('Facial landmark teleportation jitter detected between frames.');
+      } else if (facialMetrics.hasZeroBlinkRate) {
+        deductions.push('Zero blink rate across observation window — inconsistent with natural human behaviour.');
+      }
+    }
+
+    // Compose final message
+    if (deductions.length === 0) {
+      if (score >= 90) {
+        statusText = 'All forensic layers clear. No synthetic signals detected. High confidence in authenticity.';
+      } else if (score >= 76) {
+        statusText = 'No significant anomalies detected. Media appears authentic.';
+      } else if (score >= 50) {
+        statusText = 'Minor inconsistencies noted. Review flagged moments for context.';
+      } else {
+        statusText = 'Multiple anomaly signals detected. Low confidence in media authenticity.';
+      }
+    } else if (deductions.length === 1) {
+      statusText = deductions[0];
+    } else {
+      statusText = deductions[0] + ' Additionally: ' + deductions.slice(1).join(' ');
+    }
+
+    const provenanceValue = metadataRes.provenanceValue || (exifData?.software || 'Provenance appears consistent');
+    const provenanceStatus = metadataRes.isSyntheticMetadata ? 'warning' : 'verified';
+    const layer2Status = facialStatus;
+    const layer3Status = mediaType === 'image'
+      ? 'N/A — Static Image'
+      : (audioAiResult ? `${audioAiResult.status} (${audioAiResult.confidence}%)` : 'Synchronized');
+
+    const provenanceCheck = !!(exifData?.hasExif || exifData?.hasC2PA || ytMetadata);
+    const metadataCheck = !metadataRes.isSyntheticMetadata;
+    const facialCheck = mediaType === 'audio' || mediaType === 'image' || isFacelessMode
+      ? 'N/A'
+      : !(facialMetrics.hasUnnaturalMeshSmoothing || facialMetrics.hasTeleportationJitter || facialMetrics.hasZeroBlinkRate || facialAnomalies.length > 0);
+    const audioCheck = mediaType === 'image' ? 'N/A' : !audioMetrics.hasTtsAudioSignature;
+    const avSyncCheck = mediaType === 'video' || mediaType === 'youtube' ? (pythonAvSync?.correlation_score >= 80) : 'N/A';
+
+    const checks = [
+      { label: 'Metadata', result: metadataCheck },
+      { label: 'Provenance', result: provenanceCheck },
+      { label: 'Facial Mesh', result: facialCheck },
+      { label: 'Audio Spectrum', result: audioCheck },
+      { label: 'AV Sync', result: avSyncCheck }
+    ];
+
+    const validChecks = checks.filter((c) => c.result !== 'N/A');
+    const checksPassed = validChecks.filter((c) => c.result === true).length;
+    const checksTotal = validChecks.length;
+    const checksSummary = `${checksPassed}/${checksTotal} checks passed`;
+
     setAnalysisResult({
-      score: score,
-      statusText: score > 75 ? "Likely Authentic. Minimal anomalies detected." : "Anomalies Detected. Potential synthetic media or lip-sync manipulation.",
-      sha: sha,
+      score,
+      statusText,
+      sha,
       flags: newFlags,
+      checksSummary,
+      scoreBreakdown,
       verifications: [
-        { label: "EXIF & Provenance", value: meta.software || "Verified Clean", status: score > 90 ? "verified" : "warning", icon: FileCheck },
-        { label: "Audio-Visual Kinematics", value: audioFlags.length > 0 ? `${audioFlags.length} Desync Event(s)` : "Synchronized", status: audioFlags.length === 0 ? "verified" : "warning", icon: AudioLines },
-        { label: "Facial Landmark Consistency", value: facialStatus, status: (facialAnomalies.length === 0 && (pythonAvSync?.correlation_score || 85) >= 75) ? "verified" : "warning", icon: ScanFace },
-        { label: "Python OpenCV+Librosa AV Sync", value: pythonAvSync ? `${pythonAvSync.correlation_score}% Correlation (${pythonAvSync.av_sync_status})` : "Anomaly Checked", status: (pythonAvSync?.correlation_score || 85) >= 75 ? "verified" : "warning", icon: Activity },
+        {
+          label: "EXIF & Provenance",
+          value: provenanceValue,
+          status: provenanceStatus,
+          icon: FileCheck
+        },
+        {
+          label: "Spatial & Facial Mesh",
+          value: layer2Status,
+          status: (mediaType === 'audio' || mediaType === 'image' || isFacelessMode) ? "verified" : (facialCheck ? "verified" : "warning"),
+          icon: ScanFace
+        },
+        {
+          label: "Audio AI Spectrum",
+          value: layer3Status,
+          status: mediaType === 'image' ? "verified" : (audioMetrics.hasTtsAudioSignature ? "warning" : "verified"),
+          icon: AudioLines
+        },
       ]
     });
-
     setIsAnalyzing(false);
-  }, [facialAnomalies, pythonAvSync, liveLipSync]);
+  }, [facialAnomalies, pythonAvSync, liveLipSync, nlpMetadataResult, audioAiResult, mediaType, isFacelessMode, ytMetadata, fileDetails, inputUrl]);
 
+  // Auto-update estimated time countdown
+  useEffect(() => {
+    if (!isAnalyzing || !estimatedTime) return;
+    const interval = setInterval(() => {
+      setEstimatedTime(prev => {
+        if (prev && prev > 0) return Math.max(0, prev - 0.1);
+        return 0;
+      });
+    }, 6000); // Update every 6 seconds for visual feedback
+    return () => clearInterval(interval);
+  }, [isAnalyzing, estimatedTime]);
+
+  // ─── TYPE-AWARE ANALYSIS ENGINE ──────────────────────────
   const runAnalysisOnSource = async (source) => {
-    setIsAnalyzing(true);
-    setError(null);
-    setFacialAnomalies([]);
-    setTimeSeriesData([]);
-    setPythonAvSync(null);
-    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Video" }, audioFlags: [] };
-
+    setIsAnalyzing(true); setError(null);
+    setFacialAnomalies([]); setTimeSeriesData([]); setPythonAvSync(null);
+    setEstimatedTime(null); // Reset time estimate
+    analysisData.current = { sha: "N/A (Streamed)", meta: { software: "Streamed Media" }, audioFlags: [], meshMetrics: {}, audioKinematics: null };
     setAnalysisResult(prev => ({ ...prev, score: null, statusText: "Analysis in progress..." }));
 
-    if (source.type === 'file' && source.file) {
-      setAnalysisStep("1/3: Analyzing file metadata & audio...");
-      analysisData.current.sha = await calculateFileHash(source.file);
-      analysisData.current.meta = await extractFileMetadata(source.file);
-      analysisData.current.audioFlags = await analyzeAudioKinematics(source.file);
+    const type = source.mediaType || mediaType || 'video';
+
+    // Immediate metadata firewall scan of title & URL
+    const immediateNlp = analyzeMetadataFirewall({ title: fileDetails?.name || '', description: inputUrl || '', url: inputUrl });
+    if (immediateNlp.isSyntheticMetadata) {
+      setNlpMetadataResult(immediateNlp);
     }
 
-    try {
-      setAnalysisStep("2/3: Triggering Python OpenCV + Librosa Frame Analysis...");
-      const pyResp = await fetch(`${BACKEND_URL}/api/analyze-av-sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoUrl: source.type === 'stream' ? videoSrc : null, videoPath: source.file?.name || null })
-      });
-      if (pyResp.ok) {
-        const pyData = await pyResp.json();
-        if (pyData.success) {
-          setPythonAvSync(pyData);
+    // LAYER 1: EXIF + SHA-256 (all types)
+    if (source.type === 'file' && source.file) {
+      setAnalysisStep(`1/3: Extracting ${type === 'image' ? 'EXIF/C2PA' : 'metadata'} & SHA-256...`);
+      analysisData.current.sha = await calculateFileHash(source.file);
+      const meta = await extractFileMetadata(source.file);
+      analysisData.current.meta = meta;
+      setExifData(meta);
+    }
+
+    // LAYER 3: Audio AI — spectral flatness + TTS classification (video + audio only)
+    if (type === 'video' || type === 'audio') {
+      if (source.type === 'file' && source.file) {
+        setAnalysisStep("2/3: Running Audio AI Spectral Analysis...");
+        const audioResult = await analyzeAudioKinematics(source.file);
+        // kinematics now returns { anomalies[], aiClassification: { isSyntheticAudio, confidence, status, flags } }
+        const rawAnomalies = Array.isArray(audioResult) ? audioResult : (audioResult.anomalies || []);
+        const classification = Array.isArray(audioResult) ? null : (audioResult.aiClassification || null);
+        analysisData.current.audioKinematics = audioResult;
+        analysisData.current.audioFlags = rawAnomalies;
+        if (classification) setAudioAiResult(classification);
+      }
+    }
+
+    // Python AV-Sync (video only)
+    if (type === 'video' || type === 'youtube') {
+      try {
+        setAnalysisStep("2/3: Triggering Python OpenCV + Librosa Analysis...");
+        const pyResp = await fetch(`${BACKEND_URL}/api/analyze-av-sync`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ videoUrl: source.type === 'stream' ? mediaSrc : null, videoPath: source.file?.name || null })
+        });
+        if (pyResp.ok) {
+          const pyData = await pyResp.json();
+          if (pyData.success) setPythonAvSync(pyData);
+        }
+      } catch (e) { console.warn("Python AV Sync fallback:", e.message); }
+    }
+
+    // LAYER 2: Facial Mesh (video only) or immediate finalize (image/audio/youtube-short)
+    if (type === 'video') {
+      setAnalysisStep("3/3: Running WebGL Face Mesh & Audio Forensics...");
+      const video = videoRef.current;
+      let longVideoDetected = false;
+      if (video) {
+        video.volume = 0.15;
+        if (video.duration > 180) {
+          longVideoDetected = true;
+          setIsLongVideo(true);
+          // Estimate processing time: ~1 min per 3-min segment + overhead
+          const segments = 3; // Default sampling strategy
+          const timePerSegment = 25; // seconds per segment
+          const estimatedSeconds = (segments * timePerSegment) + 15; // Add scanning overhead
+          setEstimatedTime(Math.ceil(estimatedSeconds / 60)); // Convert to minutes
+        } else {
+          setEstimatedTime(2); // Short videos take ~1-2 min
         }
       }
-    } catch (e) {
-      console.warn("Python AV Sync backend call fallback:", e.message);
+
+      if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
+      if (smartSampleMode && longVideoDetected && video) {
+        await runLongVideoSmartSampling();
+        finalizeAnalysis();
+      } else {
+        if (video) {
+          video.play().catch(() => {});
+        }
+        analysisTimeoutRef.current = setTimeout(() => finalizeAnalysis(), 5000);
+      }
+    } else {
+      // Image, Audio: finalize after brief scan
+      setAnalysisStep("3/3: Finalizing forensic layers...");
+      setEstimatedTime(1); // Quick analysis
+      setTimeout(() => finalizeAnalysis(), 800);
     }
-
-    setAnalysisStep("3/3: Performing live Web Audio API & Lip Distance landmark analysis...");
-
-    // Attempt video playback
-    if (videoRef.current) {
-      videoRef.current.volume = 0.15;
-      videoRef.current.play().catch((err) => {
-        console.warn("Video auto-play skipped due to browser policy or CORS:", err.message);
-      });
-    }
-
-    // Safety completion timer (auto-completes after 5 seconds so YouTube streams never get stuck!)
-    if (analysisTimeoutRef.current) clearTimeout(analysisTimeoutRef.current);
-    analysisTimeoutRef.current = setTimeout(() => {
-      finalizeAnalysis();
-    }, 5000);
   };
 
+  // ─── FILE HANDLER ─────────────────────────────────────────
   const handleProcessFile = (file) => {
     if (!file) return;
     const objectUrl = URL.createObjectURL(file);
-    setVideoSrc(objectUrl);
+    const type = classifyMediaType(file);
+    setMediaType(type);
+    setMediaSrc(objectUrl);
+    setYoutubeId(null);
+
     setFileDetails({
       name: file.name,
       size: (file.size / (1024 * 1024)).toFixed(2) + " MB",
-      type: file.type || "video/mp4"
+      type: file.type || getFormatLabel(file, null, type)
     });
-    
+
     setTimeout(() => {
-      if (videoRef.current) {
-        videoRef.current.src = objectUrl;
-      }
-      runAnalysisOnSource({ type: 'file', file });
+      if (type === 'video' && videoRef.current) videoRef.current.src = objectUrl;
+      runAnalysisOnSource({ type: 'file', file, mediaType: type });
     }, 100);
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleProcessFile(e.dataTransfer.files[0]);
-    }
-  };
-
+  // ─── URL HANDLER ──────────────────────────────────────────
   const handleUrlSubmit = async () => {
     if (!inputUrl) return;
     setIsAnalyzing(true);
-    setAnalysisStep("Contacting backend for stream URL...");
+    setAnalysisStep("Resolving URL & extracting metadata...");
     setError(null);
 
+    const type = classifyMediaType(null, inputUrl);
+    setMediaType(type);
+
+    // Set estimated time based on URL type (YouTube videos can be long)
+    if (type === 'youtube') {
+      setEstimatedTime(3); // YouTube typically needs 2-3 minutes
+    }
+
+    // Run metadata firewall scan immediately on the URL input string itself
+    const urlMetadataRes = analyzeMetadataFirewall({ title: '', description: inputUrl, url: inputUrl });
+    if (urlMetadataRes.isSyntheticMetadata) {
+      setNlpMetadataResult(urlMetadataRes);
+    }
+
+    // YouTube: embed iframe directly
+    if (type === 'youtube') {
+      const ytId = extractYouTubeId(inputUrl);
+      setYoutubeId(ytId);
+
+      try {
+        const resp = await fetch(`${BACKEND_URL}/api/process-url`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: inputUrl }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Backend failed.');
+
+        const streamUrl = data.streamUrl || inputUrl;
+        setMediaSrc(streamUrl);
+
+        if (data.metadata) {
+          setYtMetadata(data.metadata);
+          const metadataRes = analyzeMetadataFirewall(data.metadata);
+          if (metadataRes.isSyntheticMetadata || urlMetadataRes.isSyntheticMetadata) {
+            setNlpMetadataResult(metadataRes.isSyntheticMetadata ? metadataRes : urlMetadataRes);
+          }
+          if (data.metadata.duration > 180) setIsLongVideo(true);
+        }
+
+        setFileDetails({ name: data.metadata?.title || inputUrl, size: data.metadata?.channel ? `Channel: ${data.metadata.channel}` : "YouTube", type: "YouTube Web Stream" });
+
+        setTimeout(() => {
+          if (videoRef.current) videoRef.current.src = streamUrl;
+          runAnalysisOnSource({ type: 'stream', mediaType: 'youtube' });
+        }, 150);
+      } catch (err) {
+        // ── Backend offline fallback: use YouTube oEmbed API (public, no auth, no CORS) ──
+        // This lets us still scan the video title for AI keywords even without the backend
+        try {
+          setAnalysisStep("Fetching YouTube metadata via oEmbed...");
+          const oEmbedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(inputUrl)}&format=json`;
+          const oEmbedResp = await fetch(oEmbedUrl);
+          if (oEmbedResp.ok) {
+            const oEmbedData = await oEmbedResp.json();
+            const title   = oEmbedData.title   || '';
+            const channel = oEmbedData.author_name || '';
+
+            // Store as ytMetadata so finalizeAnalysis can scan it
+            const oEmbedMeta = { title, channel, description: '', tags: [], url: inputUrl };
+            setYtMetadata(oEmbedMeta);
+            setFileDetails({ name: title || inputUrl, size: `Channel: ${channel}`, type: 'YouTube Web Stream' });
+
+            // Immediately run the metadata firewall so the red banner appears right away
+            const metadataRes = analyzeMetadataFirewall(oEmbedMeta);
+            if (metadataRes.isSyntheticMetadata) {
+              setNlpMetadataResult(metadataRes);
+            }
+          } else {
+            setFileDetails({ name: inputUrl, size: 'YouTube', type: 'YouTube Web Stream' });
+          }
+        } catch (_oEmbedErr) {
+          setFileDetails({ name: inputUrl, size: 'YouTube', type: 'YouTube Web Stream' });
+        }
+        setTimeout(() => runAnalysisOnSource({ type: 'stream', mediaType: 'youtube' }), 150);
+      }
+      return;
+    }
+
+    // Image URL: render directly
+    if (type === 'image') {
+      setMediaSrc(inputUrl);
+      const fileName = inputUrl.split('/').pop() || inputUrl;
+      setFileDetails({ name: fileName, size: "Remote", type: getFormatLabel(null, inputUrl, 'image') });
+      setAnalysisStep("Analyzing remote image...");
+      analysisData.current = { sha: "N/A (Remote)", meta: { title: fileName, url: inputUrl, software: "Remote Image" }, audioFlags: [] };
+      if (urlMetadataRes.isSyntheticMetadata) setNlpMetadataResult(urlMetadataRes);
+      setAnalysisResult(prev => ({ ...prev, score: null, statusText: "Analysis in progress..." }));
+      setTimeout(() => finalizeAnalysis(), 1200);
+      return;
+    }
+
+    // Video/Audio URL: resolve via backend
     try {
-      const response = await fetch(`${BACKEND_URL}/api/process-url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const resp = await fetch(`${BACKEND_URL}/api/process-url`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: inputUrl }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Backend failed.');
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Backend failed.');
 
-      const finalStreamUrl = data.streamUrl || inputUrl;
-      setVideoSrc(finalStreamUrl);
-      setFileDetails({ name: inputUrl, size: "Streamed", type: "video/mp4" });
+      const streamUrl = data.streamUrl || inputUrl;
+      setMediaSrc(streamUrl);
+      setFileDetails({ name: data.metadata?.title || inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
 
       setTimeout(() => {
-        if (videoRef.current) videoRef.current.src = finalStreamUrl;
-        runAnalysisOnSource({ type: 'stream' });
+        if (type === 'video' && videoRef.current) videoRef.current.src = streamUrl;
+        runAnalysisOnSource({ type: 'stream', mediaType: type });
       }, 150);
     } catch (err) {
-      console.warn("URL resolution error, falling back to direct URL:", err.message);
-      setVideoSrc(inputUrl);
-      setFileDetails({ name: inputUrl, size: "Streamed", type: "video/mp4" });
+      setMediaSrc(inputUrl);
+      setFileDetails({ name: inputUrl, size: "Streamed", type: getFormatLabel(null, inputUrl, type) });
       setTimeout(() => {
-        if (videoRef.current) videoRef.current.src = inputUrl;
-        runAnalysisOnSource({ type: 'stream' });
+        if (type === 'video' && videoRef.current) videoRef.current.src = inputUrl;
+        runAnalysisOnSource({ type: 'stream', mediaType: type });
       }, 150);
     }
   };
 
+  const handleDrop = (e) => { e.preventDefault(); setIsDragOver(false); if (e.dataTransfer.files?.[0]) handleProcessFile(e.dataTransfer.files[0]); };
+
+  // ─── SAVE / EXPORT / REOPEN ───────────────────────────────
   const handleSaveReport = () => {
-    const currentThumb = thumbnailUrl || captureVideoThumbnail();
-
-    const reportItem = {
-      id: "REP-" + Date.now(),
-      timestamp: new Date().toLocaleString(),
-      fileName: fileDetails?.name || inputUrl || "Uploaded_Video.mp4",
-      videoSrc: videoSrc,
-      fileDetails: fileDetails,
-      thumbnailUrl: currentThumb,
-      score: analysisResult.score !== null ? analysisResult.score : 87,
-      statusText: analysisResult.statusText,
-      flags: analysisResult.flags,
-      sha: analysisResult.sha,
-      verifications: analysisResult.verifications,
-      pythonAvSync: pythonAvSync
+    const thumb = thumbnailUrl || captureVideoThumbnail();
+    const item = {
+      id: "REP-" + Date.now(), timestamp: new Date().toLocaleString(),
+      fileName: fileDetails?.name || inputUrl || "Media", mediaSrc, fileDetails, thumbnailUrl: thumb, mediaType,
+      score: analysisResult.score ?? 87, statusText: analysisResult.statusText,
+      flags: analysisResult.flags, sha: analysisResult.sha, verifications: analysisResult.verifications, pythonAvSync
     };
-
-    const updated = [reportItem, ...savedReports];
+    const updated = [item, ...savedReports];
     setSavedReports(updated);
     localStorage.setItem("deepsync_reports_history", JSON.stringify(updated));
-
     setSaveSuccessNotice(true);
     setTimeout(() => setSaveSuccessNotice(false), 3000);
   };
 
   const handleReopenProject = (report) => {
     setShowHistoryModal(false);
-    if (report.videoSrc) {
-      setVideoSrc(report.videoSrc);
-    }
-    if (report.fileDetails) {
-      setFileDetails(report.fileDetails);
-    }
-    if (report.thumbnailUrl) {
-      setThumbnailUrl(report.thumbnailUrl);
-    }
-    if (report.pythonAvSync) {
-      setPythonAvSync(report.pythonAvSync);
-    }
-    setAnalysisResult({
-      score: report.score,
-      statusText: report.statusText,
-      sha: report.sha || "N/A",
-      flags: report.flags || [],
-      verifications: report.verifications || analysisResult.verifications
-    });
-
-    setTimeout(() => {
-      if (videoRef.current && report.videoSrc) {
-        videoRef.current.src = report.videoSrc;
-      }
-    }, 100);
+    if (report.mediaSrc) setMediaSrc(report.mediaSrc);
+    if (report.fileDetails) setFileDetails(report.fileDetails);
+    if (report.thumbnailUrl) setThumbnailUrl(report.thumbnailUrl);
+    if (report.mediaType) setMediaType(report.mediaType);
+    if (report.pythonAvSync) setPythonAvSync(report.pythonAvSync);
+    setAnalysisResult({ score: report.score, statusText: report.statusText, sha: report.sha || "N/A", flags: report.flags || [], verifications: report.verifications || analysisResult.verifications });
+    setTimeout(() => { if (videoRef.current && report.mediaSrc) videoRef.current.src = report.mediaSrc; }, 100);
   };
 
   const handleExportReport = () => {
     const scoreVal = analysisResult.score !== null ? `${analysisResult.score}%` : "Pending";
-    const statusVal = analysisResult.statusText;
-    const fileName = fileDetails?.name || inputUrl || "Uploaded_Media.mp4";
+    const fileName = fileDetails?.name || inputUrl || "Media";
     const dateStr = new Date().toLocaleString();
-    const currentThumb = thumbnailUrl || captureVideoThumbnail();
 
-    const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>MAYA Audit Report - ${fileName}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0b132b; color: #e2e8f0; margin: 0; padding: 40px; }
-    .container { max-width: 800px; margin: 0 auto; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); }
-    .header { display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #1e293b; padding-bottom: 20px; margin-bottom: 24px; }
-    .logo { font-size: 24px; font-weight: 900; color: #38bdf8; letter-spacing: 1px; }
-    .badge { font-size: 12px; font-family: monospace; background: rgba(56, 189, 248, 0.1); color: #38bdf8; padding: 4px 12px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.3); }
-    .top-grid { display: grid; grid-template-columns: 200px 1fr; gap: 20px; margin-bottom: 24px; }
-    .score-card { background: #1e293b; border-radius: 10px; padding: 24px; text-align: center; display: flex; flex-direction: column; justify-content: center; }
-    .score-num { font-size: 44px; font-weight: 900; color: ${analysisResult.score > 75 ? '#10b981' : '#f59e0b'}; font-family: monospace; margin: 0; }
-    .score-label { font-size: 13px; color: #94a3b8; margin-top: 4px; }
-    .thumb-card { background: #000; border-radius: 10px; overflow: hidden; border: 1px solid #334155; height: 160px; display: flex; align-items: center; justify-content: center; }
-    .thumb-card img { width: 100%; height: 100%; object-fit: cover; }
-    .section-title { font-size: 14px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px; margin-top: 24px; margin-bottom: 12px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: monospace; }
-    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #1e293b; }
-    th { color: #64748b; font-weight: 600; }
-    td { color: #cbd5e1; }
-    .flag-item { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: #fbbf24; padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; font-size: 12px; font-family: monospace; }
-    .print-btn { background: #0284c7; color: #fff; font-weight: 600; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; margin-top: 24px; font-size: 13px; }
-    @media print { .print-btn { display: none; } body { background: #fff; color: #000; padding: 0; } .container { background: #fff; border: none; box-shadow: none; } .score-card { background: #f1f5f9; } th, td { border-bottom-color: #e2e8f0; td { color: #000; } } }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div>
-        <div class="logo">MAYA</div>
-        <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Media Authenticity Audit</div>
-      </div>
-      <div class="badge">CONFIDENTIAL AUDIT REPORT</div>
-    </div>
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>MAYA C2PA Certificate - ${fileName}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;background:#0b132b;color:#e2e8f0;margin:0;padding:40px}.c{max-width:800px;margin:0 auto;background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:32px;box-shadow:0 20px 25px -5px rgba(0,0,0,.5)}.h{display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #1e293b;padding-bottom:20px;margin-bottom:24px}.logo{font-size:24px;font-weight:900;color:#38bdf8;letter-spacing:1px}.badge{font-size:12px;font-family:monospace;background:rgba(56,189,248,.1);color:#38bdf8;padding:4px 12px;border-radius:6px;border:1px solid rgba(56,189,248,.3)}.st{font-size:14px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:1px;margin-top:24px;margin-bottom:12px}table{width:100%;border-collapse:collapse;font-size:13px;font-family:monospace}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #1e293b}th{color:#64748b;font-weight:600}td{color:#cbd5e1}.f{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;padding:8px 12px;border-radius:6px;margin-bottom:8px;font-size:12px;font-family:monospace}.pb{background:#0284c7;color:#fff;font-weight:600;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;margin-top:24px;font-size:13px}@media print{.pb{display:none}body{background:#fff;color:#000;padding:0}.c{background:#fff;border:none;box-shadow:none}}</style></head><body><div class="c"><div class="h"><div><div class="logo">MAYA C2PA CERTIFICATE</div><div style="font-size:12px;color:#64748b;margin-top:4px">Media Type: ${(mediaType || 'video').toUpperCase()}</div></div><div class="badge">${scoreVal} — ${analysisResult.statusText}</div></div>
+<div class="st">Media Metadata</div><table><tr><th>File</th><td>${fileName}</td></tr><tr><th>Date</th><td>${dateStr}</td></tr><tr><th>SHA-256</th><td>${analysisResult.sha}</td></tr><tr><th>Type</th><td>${mediaType}</td></tr><tr><th>Checks</th><td>${analysisResult.checksSummary || 'N/A'}</td></tr></table>
+<div class="st">Multi-Layer Verification</div><table><thead><tr><th>Layer</th><th>Result</th><th>Status</th></tr></thead><tbody>${analysisResult.verifications.map(v => `<tr><td>${v.label}</td><td>${v.value}</td><td style="color:${v.status === 'verified' ? '#10b981' : '#f59e0b'}">${v.status.toUpperCase()}</td></tr>`).join('')}</tbody></table>
+<div class="st">Timestamped Anomalies (${analysisResult.flags.length})</div>${analysisResult.flags.length === 0 ? '<div style="font-size:13px;color:#10b981;font-family:monospace">✓ Zero forensic anomalies.</div>' : analysisResult.flags.map(f => `<div class="f">⚠️ [${f.time}] ${f.label} — ${f.detail || 'Mismatch'}</div>`).join('')}
+<div class="st">Score Breakdown</div><div style="font-family:monospace;color:#cbd5e1;font-size:13px;line-height:1.5">${analysisResult.scoreBreakdown || 'N/A'}</div>
+<button class="pb" onclick="window.print()">Print / Save as PDF</button></div></body></html>`;
 
-    <div class="top-grid">
-      <div class="score-card">
-        <div class="score-num">${scoreVal}</div>
-        <div class="score-label">${statusVal}</div>
-      </div>
-      <div class="thumb-card">
-        ${currentThumb ? `<img src="${currentThumb}" alt="Analyzed Media Thumbnail" />` : '<div style="color:#64748b; font-size:12px; font-family:monospace;">Video Preview Thumbnail</div>'}
-      </div>
-    </div>
-
-    <div class="section-title">Media Metadata & Provenance</div>
-    <table>
-      <tr><th>File Name</th><td>${fileName}</td></tr>
-      <tr><th>Audit Date</th><td>${dateStr}</td></tr>
-      <tr><th>SHA-256 Hash</th><td>${analysisResult.sha}</td></tr>
-      <tr><th>Resolution / Format</th><td>1920x1080 (MP4)</td></tr>
-    </table>
-
-    <div class="section-title">Multi-Layer Verification Checks</div>
-    <table>
-      <thead><tr><th>Inspection Layer</th><th>Result</th><th>Status</th></tr></thead>
-      <tbody>
-        ${analysisResult.verifications.map(v => `
-          <tr>
-            <td>${v.label}</td>
-            <td>${v.value}</td>
-            <td style="color: ${v.status === 'verified' ? '#10b981' : '#f59e0b'}">${v.status.toUpperCase()}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-
-    <div class="section-title">Flagged Moments & Anomalies (${analysisResult.flags.length})</div>
-    ${analysisResult.flags.length === 0 ? '<div style="font-size:13px; color:#10b981; font-family:monospace;">✓ Zero forensic anomalies detected. Media appears authentic.</div>' : ''}
-    ${analysisResult.flags.map(f => `<div class="flag-item">⚠️ [${f.time}] ${f.label} - ${f.detail || 'Mismatch detected'}</div>`).join('')}
-
-    <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
-  </div>
-</body>
-</html>
-    `;
-
-    const blob = new Blob([htmlContent], { type: "text/html" });
+    const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `MAYA_Report_${Date.now()}.html`;
-    a.click();
+    a.href = url; a.download = `MAYA_Certificate_${Date.now()}.html`; a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Calculated Real-Time Lip-Sync Metrics
+  // Computed metrics
   const currentMar = (liveLipSync.mar || 0.28).toFixed(3);
   const currentAudioVolume = Math.round((liveLipSync.audioVolume || 0.42) * 100);
   const phonemeMatchScore = pythonAvSync?.correlation_score || 91;
+  const isExportReady = !isAnalyzing && analysisResult.score !== null;
+  const lipSyncStatus = mediaType === 'video' ? (liveLipSync.mar > 0.4 && liveLipSync.audioVolume < 0.2 ? 'DESYNC' : 'IN SYNC') : 'N/A';
+  const lipSyncDetail = mediaType === 'video'
+    ? (liveLipSync.mar > 0.4 && liveLipSync.audioVolume < 0.2
+      ? 'Audio activity detected without consistent mouth movement; possible lip-sync anomaly.'
+      : 'Mouth motion and audio energy appear aligned for the visible face.')
+    : 'Lip-sync diagnostics only apply to video sources.';
+  const exportHighlightClasses = isExportReady
+    ? 'bg-cyan-500 hover:bg-cyan-400 shadow-cyan-500/30 animate-pulse'
+    : 'bg-cyan-600 hover:bg-cyan-500';
 
+  // ─── RENDER ───────────────────────────────────────────────
   return (
     <div className="flex h-screen w-full bg-[#080D18] text-slate-200 font-sans overflow-hidden">
-      
-      {/* --- SIDEBAR NAV --- */}
+
+      {/* --- SIDEBAR --- */}
       <aside className="w-60 bg-[#0B132B] border-r border-slate-800/80 flex flex-col justify-between p-4 shrink-0">
         <div>
           <div className="mb-8 px-2 pt-2">
-            <h1 className="text-xl font-black text-white tracking-wider font-mono">
-              MAYA
-            </h1>
+            <h1 className="text-xl font-black text-white tracking-wider font-mono">MAYA</h1>
           </div>
-
           <nav className="space-y-1">
             {[
               { id: "Overview", icon: LayoutDashboard },
@@ -519,18 +766,9 @@ export default function AnalysisPage() {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
               return (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    setActiveTab(item.id);
-                    if (item.id === "History") setShowHistoryModal(true);
-                    if (item.id === "Reports") setShowReportModal(true);
-                  }}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-all ${
-                    isActive 
-                      ? "bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 shadow-sm" 
-                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-                  }`}
+                <button key={item.id}
+                  onClick={() => { setActiveTab(item.id); if (item.id === "History") setShowHistoryModal(true); if (item.id === "Reports") setShowReportModal(true); }}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-medium transition-all ${isActive ? "bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 shadow-sm" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"}`}
                 >
                   <Icon className={`h-4 w-4 ${isActive ? "text-cyan-400" : "text-slate-500"}`} />
                   <span>{item.id}</span>
@@ -542,559 +780,336 @@ export default function AnalysisPage() {
 
         <div className="space-y-2">
           <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
-            <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1">
-              <Info className="h-3 w-3 shrink-0" /> Note
-            </div>
-            This is a demo UI made with the help of AI. The final product features & lip-sync algorithms will be different.
+            <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
+            Demo UI. Final product algorithms will differ.
           </div>
-
+          <div className="p-2.5 bg-amber-500/10 rounded-lg border border-amber-500/30 text-[10px] text-amber-300/90 leading-tight">
+            <div className="flex items-center gap-1 font-semibold text-amber-400 mb-1"><Info className="h-3 w-3 shrink-0" /> Note</div>
+               Currently Not Optimized for Smaller/mobile view kindly open it in dekstop view ! 
+          </div>
           <div className="px-2 py-2 bg-slate-900/60 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-400">
             <div className="flex items-center gap-1.5 mb-0.5 text-emerald-400">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <span>468-Mesh Engine Active</span>
             </div>
-            <div className="text-[10px] text-slate-500">Local & Python AvSync</div>
+            <div className="text-[10px] text-slate-500">Multi-Modal Forensics</div>
           </div>
         </div>
       </aside>
 
-      {/* --- MAIN CONTENT AREA --- */}
+      {/* --- MAIN CONTENT --- */}
       <main className="flex-1 flex flex-col h-full overflow-y-auto bg-[#080D18]">
-        
-        {/* Top Header Bar */}
-        <header className="h-14 border-b border-slate-800/80 bg-[#0B132B]/50 px-6 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-3">
-            <h2 className="text-sm font-semibold text-white tracking-wide">MAYA</h2>
-            <span className="text-slate-600">/</span>
-            <span className="text-xs text-slate-400">{activeTab}</span>
+        {isMobileView && (
+          <div className="border-b border-amber-500/20 bg-amber-500/10 text-amber-100 text-center text-xs font-mono px-4 py-3">
+            Demo preview only. This app is not optimized for mobile yet — please use desktop view for the best experience. Mobile support coming soon.
+          </div>
+        )}
+
+        {/* Top Header */}
+        <header className="h-20 border-b border-slate-800/80 bg-[#0B132B]/50 px-6 flex flex-col justify-center shrink-0">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-sm font-semibold text-white tracking-wide">MAYA</h2>
+              <span className="text-slate-600">/</span>
+              <span className="text-xs text-slate-400">{activeTab}</span>
+              {mediaType && (
+                <span className="text-[10px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 rounded">
+                  {mediaType.toUpperCase()}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              {saveSuccessNotice && <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded">Saved!</span>}
+              <button onClick={handleAnalyzeNew} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer">
+                <RefreshCw className="h-3.5 w-3.5 text-slate-400" /> Analyze New
+              </button>
+              <button onClick={handleSaveReport} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer">
+                <FolderPlus className="h-3.5 w-3.5 text-cyan-400" /> Save
+              </button>
+              <button onClick={() => setShowReportModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer">
+                <Eye className="h-3.5 w-3.5 text-indigo-400" /> Certificate
+              </button>
+              <button onClick={() => setShowHistoryModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer">
+                <History className="h-3.5 w-3.5 text-indigo-400" /> History ({savedReports.length})
+              </button>
+              <button onClick={handleExportReport} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold text-white shadow-xl transition-all cursor-pointer ${isExportReady ? 'bg-gradient-to-r from-cyan-500 to-cyan-600 hover:from-cyan-400 hover:to-cyan-500 shadow-cyan-500/50 scale-105' : 'bg-cyan-700 hover:bg-cyan-600 opacity-60'}`} disabled={!isExportReady} title="Export your forensic analysis certificate">
+                <Download className="h-4 w-4" /> Export Certificate
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            {saveSuccessNotice && (
-              <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-1 rounded">
-                Saved to LocalStorage!
-              </span>
-            )}
-            
-            <button
-              onClick={handleAnalyzeNew}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
-            >
-              <RefreshCw className="h-3.5 w-3.5 text-slate-400" />
-              <span>Analyze New</span>
-            </button>
-
-            <button
-              onClick={handleSaveReport}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
-            >
-              <FolderPlus className="h-3.5 w-3.5 text-cyan-400" />
-              <span>Save Report</span>
-            </button>
-
-            <button
-              onClick={() => setShowReportModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
-            >
-              <Eye className="h-3.5 w-3.5 text-indigo-400" />
-              <span>View Report</span>
-            </button>
-
-            <button
-              onClick={() => setShowHistoryModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
-            >
-              <History className="h-3.5 w-3.5 text-indigo-400" />
-              <span>History ({savedReports.length})</span>
-            </button>
-
-            <button
-              onClick={handleExportReport}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded text-xs font-medium bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold shadow-lg shadow-cyan-600/20 transition-all cursor-pointer"
-            >
-              <Download className="h-3.5 w-3.5 text-slate-950" />
-              <span>Export Report</span>
-            </button>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <span className="text-[10px] font-mono text-slate-300 bg-slate-900/70 px-2 py-1 rounded border border-slate-800">Desktop view recommended; mobile support coming soon.</span>
           </div>
         </header>
 
-        {/* Dashboard Grid Container */}
+        {/* Dashboard */}
         <div className="p-6 space-y-5 max-w-7xl mx-auto w-full">
-          
+
+          {/* === STATUS BANNERS === */}
+          {isLongVideo && (
+            <div className="bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 flex items-center justify-between text-xs text-amber-200 font-mono">
+              <div className="flex items-center gap-2.5"><Clock className="h-4 w-4 text-amber-400" /><span>Long media detected (&gt;3 mins). Smart Sample Forensics active.</span></div>
+              <button onClick={() => setSmartSampleMode(!smartSampleMode)} className="bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[10px] px-2.5 py-1 rounded cursor-pointer">
+                {smartSampleMode ? "Smart Sample (Active)" : "Full Scan Mode"}
+              </button>
+            </div>
+          )}
+          {isExportReady && (
+            <div className="bg-emerald-500/15 border border-emerald-500/40 rounded-lg p-4 flex items-center justify-between text-sm text-emerald-100 font-mono">
+              <div className="flex items-center gap-2"><CheckCircle2 className="h-5 w-5 text-emerald-400" /><span>✓ Analysis complete! Your forensic report is ready.</span></div>
+              <button onClick={handleExportReport} className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded font-semibold text-xs transition-colors cursor-pointer flex items-center gap-1">
+                <Download className="h-3.5 w-3.5" /> Export Now
+              </button>
+            </div>
+          )}
+          {(isFacelessMode || mediaType === 'audio') && (
+            <div className="bg-indigo-500/10 border border-indigo-500/40 rounded-lg p-3 flex items-center justify-between text-xs text-indigo-200 font-mono">
+              <div className="flex items-center gap-2.5"><Mic className="h-4 w-4 text-indigo-400" /><span>{mediaType === 'audio' ? "Audio-Only Media — Analysis shifted to Audio AI Spectrum (Face penalties bypassed)" : "Faceless Media Mode — Facial Mesh bypassed (0 points deducted)"}</span></div>
+              <span className="text-[10px] text-indigo-300 font-semibold bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-500/30">Neutral Facial Layer</span>
+            </div>
+          )}
+          {nlpMetadataResult?.isSyntheticMetadata && (
+            <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 flex items-center justify-between text-xs text-red-200 font-mono">
+              <div className="flex items-center gap-2.5"><ShieldAlert className="h-4 w-4 text-red-400" /><span>Synthetic Title/Metadata Marker Detected: "{nlpMetadataResult.matchedKeywords[0]}" (-60 pts)</span></div>
+              <span className="text-[10px] text-red-300 font-semibold bg-red-500/20 px-2 py-0.5 rounded border border-red-500/30">High Threat Flag</span>
+            </div>
+          )}
           {isAnalyzing && (
             <div className="bg-cyan-500/10 border border-cyan-500/40 rounded-lg p-3 flex items-center justify-between text-xs text-cyan-200 font-mono">
-              <div className="flex items-center gap-3">
-                <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
-                <span>{analysisStep || "Running multi-layer analysis..."}</span>
-              </div>
-              <span className="text-[10px] text-cyan-400/80">Web Audio API + Python OpenCV/Librosa</span>
+              <div className="flex items-center gap-3"><Loader2 className="h-4 w-4 animate-spin text-cyan-400" /><span>{analysisStep || "Running multi-layer analysis..."}{estimatedTime && <span className="text-cyan-300 ml-3">⏱ ~{Math.ceil(estimatedTime)} min remaining</span>}</span></div>
+              <span className="text-[10px] text-cyan-400/80">MAYA Forensics Engine</span>
             </div>
           )}
-
           {error && (
             <div className="bg-red-500/10 border border-red-500/40 rounded-lg p-3 flex items-center gap-3 text-xs text-red-300 font-mono">
-              <XCircle className="h-4 w-4 text-red-400" />
-              <span>{error}</span>
+              <XCircle className="h-4 w-4 text-red-400" /><span>{error}</span>
             </div>
           )}
 
-          {/* TOP ROW: AUTHENTICITY SCORE & VIDEO PREVIEW (Or Dropzone) */}
+          {/* === TOP ROW: SCORE + MEDIA PREVIEW === */}
           <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-5">
-            
-            {/* 1. AUTHENTICITY SCORE CARD */}
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-5 flex flex-col items-center justify-between shadow-xl relative overflow-hidden">
-              <div className="w-full text-left">
-                <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase">AUTHENTICITY SCORE</span>
-              </div>
 
-              <div className="relative w-40 h-40 flex items-center justify-center my-4">
-                <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-                  <circle cx="50" cy="50" r="40" stroke="#1E293B" strokeWidth="8" fill="transparent" />
-                  {analysisResult.score !== null ? (
-                    <circle
-                      cx="50"
-                      cy="50"
-                      r="40"
-                      stroke={analysisResult.score > 75 ? "#10B981" : "#F59E0B"}
-                      strokeWidth="8"
-                      strokeDasharray={251.2}
-                      strokeDashoffset={251.2 - (251.2 * analysisResult.score) / 100}
-                      strokeLinecap="round"
-                      fill="transparent"
-                      className="transition-all duration-1000 ease-out"
-                    />
-                  ) : (
-                    <circle
-                      cx="50"
-                      cy="50"
-                      r="40"
-                      stroke="#475569"
-                      strokeWidth="8"
-                      strokeDasharray="8 8"
-                      fill="transparent"
-                    />
-                  )}
-                </svg>
-                <div className="absolute flex flex-col items-center justify-center text-center">
-                  <span className="text-3xl font-extrabold text-white font-mono">
-                    {analysisResult.score !== null ? `${analysisResult.score}%` : "--%"}
-                  </span>
-                  <span className={`text-[11px] font-medium mt-0.5 ${analysisResult.score === null ? 'text-slate-400' : analysisResult.score > 75 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {analysisResult.score === null ? "Awaiting Input" : analysisResult.score > 75 ? "Likely Real" : "Anomaly Detected"}
-                  </span>
-                </div>
-              </div>
+            {/* Scorecard */}
+            <Scorecard score={analysisResult.score} statusText={analysisResult.statusText} mediaType={mediaType || 'video'} checksSummary={analysisResult.checksSummary} scoreBreakdown={analysisResult.scoreBreakdown} />
 
-              <div className="w-full flex items-center justify-between text-[10px] font-mono text-slate-500 pt-2 border-t border-slate-800">
-                <span>0%</span>
-                <span className="text-slate-400">{analysisResult.statusText}</span>
-                <span>100%</span>
-              </div>
-            </div>
-
-            {/* 2. VIDEO PREVIEW + LANDMARKS / DRAG & DROP ZONE */}
+            {/* Dynamic Media Preview / Dropzone */}
             <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 flex flex-col justify-between shadow-xl relative min-h-[300px]">
               <div className="flex items-center justify-between mb-3 px-1">
                 <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-                  <Video className="h-3.5 w-3.5 text-cyan-400" /> VIDEO PREVIEW + LANDMARKS
+                  {mediaType === 'audio' ? <><Mic className="h-3.5 w-3.5 text-indigo-400" /> AUDIO WAVEFORM</> :
+                   mediaType === 'image' ? <><ImageIcon className="h-3.5 w-3.5 text-cyan-400" /> IMAGE ANALYSIS</> :
+                   mediaType === 'youtube' ? <><Video className="h-3.5 w-3.5 text-red-400" /> YOUTUBE STREAM</> :
+                   <><Video className="h-3.5 w-3.5 text-cyan-400" /> VIDEO PREVIEW + LANDMARKS</>}
                 </span>
-                {fileDetails && (
-                  <span className="text-[10px] font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded">
-                    {fileDetails.name} ({fileDetails.size})
-                  </span>
-                )}
+                {fileDetails && <span className="text-[10px] font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded truncate max-w-[250px]">{fileDetails.name}</span>}
               </div>
 
-              {videoSrc ? (
-                <div className="rounded-lg overflow-hidden border border-slate-800 bg-black aspect-video relative flex items-center justify-center">
-                  <video
-                    ref={videoRef}
-                    src={videoSrc}
-                    crossOrigin="anonymous"
-                    className="absolute inset-0 h-full w-full object-contain z-10"
-                    controls
-                    autoPlay
-                    loop={!isAnalyzing}
-                    onEnded={finalizeAnalysis}
-                    onLoadedData={captureVideoThumbnail}
-                  />
-                  <canvas ref={canvasRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none z-20" />
-                </div>
+              {mediaSrc || youtubeId ? (
+                <>
+                  {/* YOUTUBE */}
+                  {mediaType === 'youtube' && youtubeId && <YouTubeEmbed videoId={youtubeId} />}
+
+                  {/* IMAGE */}
+                  {mediaType === 'image' && <ImageViewer src={mediaSrc} onImageLoad={(dims) => setMediaResolution(dims)} />}
+
+                  {/* AUDIO */}
+                  {mediaType === 'audio' && <AudioWaveform src={mediaSrc} onAudioLoad={(info) => setMediaSampleRate(info.sampleRate)} />}
+
+                  {/* VIDEO */}
+                  {(mediaType === 'video' || (mediaType === 'youtube' && !youtubeId)) && (
+                    <div className="rounded-lg overflow-hidden border border-slate-800 bg-black aspect-video relative flex items-center justify-center">
+                      <video ref={videoRef} src={mediaSrc} crossOrigin="anonymous" className="absolute inset-0 h-full w-full object-contain z-10" controls autoPlay loop={!isAnalyzing} onEnded={finalizeAnalysis} onLoadedMetadata={() => { if (videoRef.current?.duration > 180) setIsLongVideo(true); }} onLoadedData={captureVideoThumbnail} />
+                      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full object-contain pointer-events-none z-20" />
+                    </div>
+                  )}
+                </>
               ) : (
+                /* DROPZONE */
                 <div
                   onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
                   onDragLeave={() => setIsDragOver(false)}
                   onDrop={handleDrop}
-                  className={`flex-1 rounded-lg border-2 border-dashed transition-all flex flex-col items-center justify-center p-8 text-center cursor-pointer ${
-                    isDragOver ? "border-cyan-400 bg-cyan-500/10" : "border-slate-800 hover:border-slate-700 bg-slate-900/40"
-                  }`}
+                  className={`flex-1 rounded-lg border-2 border-dashed transition-all flex flex-col items-center justify-center p-8 text-center cursor-pointer ${isDragOver ? "border-cyan-400 bg-cyan-500/10" : "border-slate-800 hover:border-slate-700 bg-slate-900/40"}`}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={(e) => e.target.files?.[0] && handleProcessFile(e.target.files[0])}
-                    accept="video/*"
-                    className="hidden"
-                  />
-                  <div className="w-12 h-12 rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center mb-3 text-cyan-400">
-                    <Upload className="h-6 w-6" />
-                  </div>
-                  <h3 className="text-sm font-medium text-slate-200 mb-1">Drag & Drop Video / Audio File Here</h3>
-                  <p className="text-xs text-slate-500 mb-4">Supports MP4, WEBM, MOV (MediaPipe 468 landmark extraction)</p>
-                  
+                  <input type="file" ref={fileInputRef} onChange={(e) => e.target.files?.[0] && handleProcessFile(e.target.files[0])} accept="video/*,audio/*,image/*,.mp3,.wav,.aac,.m4a,.flac,.ogg,.jpg,.jpeg,.png,.webp,.avif" className="hidden" />
+                  <div className="w-12 h-12 rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center mb-3 text-cyan-400"><Upload className="h-6 w-6" /></div>
+                  <h3 className="text-sm font-medium text-slate-200 mb-1">Drop Video, Image, or Audio Here</h3>
+                  <p className="text-xs text-slate-500 mb-4">Supports MP4, WEBM, MOV, JPG, PNG, WEBP, MP3, WAV, AAC, FLAC</p>
+
                   <div className="w-full max-w-md flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
                     <div className="relative flex-1">
                       <Link className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500" />
-                      <input
-                        type="text"
-                        value={inputUrl}
-                        onChange={(e) => setInputUrl(e.target.value)}
-                        placeholder="Or paste video URL..."
+                      <input type="text" value={inputUrl} onChange={(e) => setInputUrl(e.target.value)} placeholder="Paste YouTube or media URL..."
                         className="w-full bg-slate-900 border border-slate-800 rounded-md pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-cyan-500 font-mono"
+                        onKeyDown={(e) => e.key === 'Enter' && handleUrlSubmit()}
                       />
                     </div>
-                    <button
-                      onClick={handleUrlSubmit}
-                      disabled={isAnalyzing}
-                      className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 text-xs font-semibold px-3 py-1.5 rounded transition-all cursor-pointer"
-                    >
-                      Analyze URL
-                    </button>
+                    <button onClick={handleUrlSubmit} disabled={isAnalyzing} className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 text-xs font-semibold px-3 py-1.5 rounded transition-all cursor-pointer">Analyze URL</button>
                   </div>
                 </div>
               )}
             </div>
           </div>
 
-          {/* MIDDLE ROW: ENRICHED LIP-SYNC ANALYSIS & DUAL CHART */}
+          {/* === MIDDLE ROW: LIP-SYNC + CHART (video only) === */}
+          {mediaType === 'video' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl">
+                <div className="flex flex-col gap-3 mb-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2"><Mic className="h-3.5 w-3.5 text-indigo-400" /> LIP-SYNC DIAGNOSTIC</span>
+                    <span className={`text-xs font-mono font-semibold px-2 py-0.5 rounded border ${lipSyncStatus === 'DESYNC' ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'}`}>{lipSyncStatus}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 font-mono leading-snug">
+                    {lipSyncDetail}
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2 my-2 font-mono">
+                  <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
+                    <div className="text-[10px] text-slate-500 uppercase">MAR</div>
+                    <div className="text-sm font-bold text-white">{currentMar}</div>
+                  </div>
+                  <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
+                    <div className="text-[10px] text-slate-500 uppercase">Audio Level</div>
+                    <div className="text-sm font-bold text-cyan-300">{currentAudioVolume}%</div>
+                  </div>
+                  <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
+                    <div className="text-[10px] text-slate-500 uppercase">Sync Status</div>
+                    <div className={`text-sm font-bold ${liveLipSync.mar > 0.4 && liveLipSync.audioVolume < 0.2 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      {liveLipSync.mar > 0.4 && liveLipSync.audioVolume < 0.2 ? 'DESYNC' : 'IN SYNC'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Mini Chart */}
+              <TimeSeriesChart data={timeSeriesData} title="REAL-TIME TIME SERIES" />
+            </div>
+          )}
+
+          {/* === BOTTOM ROW: VERIFICATIONS + METADATA + ATTRIBUTION === */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            {/* RICH LIP-SYNC DIAGNOSTIC CARD */}
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-                  <Mic className="h-3.5 w-3.5 text-indigo-400" /> LIP-SYNC DIAGNOSTIC MATRIX
-                </span>
-                <span className="text-xs font-mono font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
-                  <Zap className="h-3 w-3 text-emerald-400" /> Phoneme Match: {phonemeMatchScore}%
-                </span>
-              </div>
 
-              {/* Real-time Phoneme & MAR Metric Badges */}
-              <div className="grid grid-cols-3 gap-2 my-2 font-mono">
-                <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
-                  <div className="text-[10px] text-slate-500 uppercase">Mouth Distance (MAR)</div>
-                  <div className="text-sm font-bold text-cyan-400 mt-0.5">{currentMar}</div>
-                  <div className="text-[9px] text-slate-400">Lips Aspect Ratio</div>
-                </div>
-                <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
-                  <div className="text-[10px] text-slate-500 uppercase">Audio RMS Level</div>
-                  <div className="text-sm font-bold text-indigo-400 mt-0.5">{currentAudioVolume}%</div>
-                  <div className="text-[9px] text-slate-400">Web Audio Amplitude</div>
-                </div>
-                <div className="bg-slate-950/80 p-2 rounded border border-slate-800 text-center">
-                  <div className="text-[10px] text-slate-500 uppercase">Micro-Offset</div>
-                  <div className="text-sm font-bold text-emerald-400 mt-0.5">{pythonAvSync?.offset_ms || 0} ms</div>
-                  <div className="text-[9px] text-slate-400">Cross-Correlation</div>
-                </div>
+            {/* Multi-Layer Status */}
+            <div className="rounded-lg border border-slate-800 bg-[#0F172A] overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-800 bg-slate-900/50">
+                <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase">Multi-Layer Forensic Status</span>
               </div>
+              <div>
+                {analysisResult.verifications.map((v, i) => {
+                  const Icon = v.icon;
+                  const styles = { verified: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40', warning: 'bg-amber-500/20 text-amber-300 border-amber-500/40', pending: 'bg-slate-700/20 text-slate-400 border-slate-700/50' };
+                  return (
+                    <div key={i} className="flex items-center justify-between px-4 py-3 border-b border-slate-800 last:border-b-0">
+                      <div className="flex items-center gap-3">
+                        <Icon className={`h-3.5 w-3.5 ${v.status === 'pending' ? 'text-slate-500' : 'text-slate-400'}`} />
+                        <div>
+                          <div className="text-[12px] text-slate-200 font-medium">{v.label}</div>
+                          <div className="text-[11px] text-slate-500">{v.value}</div>
+                        </div>
+                      </div>
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded border capitalize ${styles[v.status]}`}>{v.status}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
 
-              {/* Spectrogram / Energy Equalizer Bars */}
-              <div className="bg-slate-950/70 p-3 rounded-lg border border-slate-800 flex items-center justify-between gap-1 h-20 my-1 overflow-hidden">
-                {[45, 70, 35, 90, 95, 50, 65, 80, 85, 100, 55, 75, 85, 45, 65, 90, 95, 35, 55, 80, 90, 50, 70, 85, 60, 40, 95, 65, 45, 75].map((h, idx) => (
-                  <div
-                    key={idx}
-                    className="w-1.5 bg-gradient-to-t from-cyan-500 via-indigo-500 to-emerald-400 rounded-full transition-all duration-300"
-                    style={{
-                      height: isAnalyzing ? `${Math.max(20, (h * (liveLipSync.audioVolume || 0.6)))}%` : `${h * 0.7}%`,
-                      opacity: isAnalyzing ? 1 : 0.75
-                    }}
-                  />
+            {/* Metadata Panel */}
+            <MetadataPanel
+              fileDetails={fileDetails} mediaType={mediaType} sha={analysisResult.sha}
+              exifData={exifData} ytMetadata={ytMetadata}
+              resolution={mediaResolution} sampleRate={mediaSampleRate}
+            />
+          </div>
+
+          {/* Flagged Moments */}
+          <div className="rounded-lg border border-slate-800 bg-[#0F172A] p-4">
+            <div className="flex items-center gap-1.5 mb-3"><Clock className="h-3.5 w-3.5 text-slate-500" /><span className="text-[12px] font-medium text-slate-400">Flagged Moments ({analysisResult.flags.length})</span></div>
+            {analysisResult.flags.length === 0 ? (
+              <p className="text-xs text-emerald-300 font-mono flex items-center gap-2 py-1"><CheckCircle2 className="h-4 w-4 text-emerald-500" /> {isAnalyzing ? 'Analysis in progress...' : 'Zero anomalies detected across all layers.'}</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {analysisResult.flags.map((f, i) => (
+                  <button key={i} onClick={() => { if (videoRef.current && f.seconds) videoRef.current.currentTime = f.seconds; }}
+                    className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 transition-all px-2.5 py-1.5 cursor-pointer">
+                    <span className="text-[11px] font-mono font-bold text-amber-400">{f.time}</span>
+                    <span className="h-3 w-px bg-slate-700" />
+                    <span className="text-[12px] text-slate-200">{f.label}</span>
+                    {f.detail && <span className="text-[11px] font-mono text-amber-400/80">({f.detail})</span>}
+                  </button>
                 ))}
               </div>
-
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-2 border-t border-slate-800">
-                <span className="flex items-center gap-1.5 text-cyan-400">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" /> MAR ↔ Audio Coherence
-                </span>
-                <span className="text-emerald-400 font-semibold">In Sync (0 ms shift)</span>
-              </div>
-            </div>
-
-            {/* AUDIO ENERGY VS LIP DISTANCE DUAL CHART */}
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase flex items-center gap-2">
-                  <Activity className="h-3.5 w-3.5 text-cyan-400" /> AUDIO ENERGY VS LIP DISTANCE
-                </span>
-                <div className="flex items-center gap-3 text-[10px] font-mono">
-                  <span className="flex items-center gap-1 text-cyan-400"><span className="w-2 h-0.5 bg-cyan-400 inline-block" /> Audio Energy</span>
-                  <span className="flex items-center gap-1 text-indigo-400"><span className="w-2 h-0.5 bg-indigo-400 inline-block" /> Lip Distance</span>
-                </div>
-              </div>
-
-              <div className="bg-slate-950/60 p-3 rounded-lg border border-slate-800 h-32 my-1 relative flex items-center">
-                <svg className="w-full h-full" viewBox="0 0 300 80" preserveAspectRatio="none">
-                  <line x1="0" y1="20" x2="300" y2="20" stroke="#1E293B" strokeDasharray="3 3" />
-                  <line x1="0" y1="40" x2="300" y2="40" stroke="#1E293B" strokeDasharray="3 3" />
-                  <line x1="0" y1="60" x2="300" y2="60" stroke="#1E293B" strokeDasharray="3 3" />
-
-                  <path
-                    d={
-                      timeSeriesData.length > 1
-                        ? timeSeriesData.map((d, i) => `${i === 0 ? 'M' : 'L'} ${(i * 300) / (timeSeriesData.length - 1)} ${70 - d.audio * 50}`).join(' ')
-                        : "M 0 50 Q 75 20, 150 60 T 300 30"
-                    }
-                    fill="none"
-                    stroke="#06B6D4"
-                    strokeWidth="2"
-                  />
-
-                  <path
-                    d={
-                      timeSeriesData.length > 1
-                        ? timeSeriesData.map((d, i) => `${i === 0 ? 'M' : 'L'} ${(i * 300) / (timeSeriesData.length - 1)} ${70 - (d.mar * 120)}`).join(' ')
-                        : "M 0 55 Q 75 25, 150 55 T 300 35"
-                    }
-                    fill="none"
-                    stroke="#6366F1"
-                    strokeWidth="2"
-                    strokeDasharray="4 2"
-                  />
-                </svg>
-              </div>
-
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-2 border-t border-slate-800">
-                <span>Timeline Correlation</span>
-                <span className="text-emerald-400 font-semibold">Matched (Real-Time)</span>
-              </div>
-            </div>
+            )}
           </div>
 
-          {/* BOTTOM ROW: METADATA, ANOMALIES, FILE INFO */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl">
-              <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase mb-3 block">
-                METADATA INSPECTION
-              </span>
-              <div className="space-y-2.5 text-xs font-mono">
-                <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                  <span className="text-slate-400 flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-emerald-400" /> Edit History</span>
-                  <span className="text-emerald-400 font-semibold">Clean</span>
-                </div>
-                <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                  <span className="text-slate-400 flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-emerald-400" /> Missing Fields</span>
-                  <span className="text-slate-300">None</span>
-                </div>
-                <div className="flex items-center justify-between py-1">
-                  <span className="text-slate-400 flex items-center gap-1.5"><FileCheck className="h-3.5 w-3.5 text-cyan-400" /> Software Signature</span>
-                  <span className="text-slate-400">Verified Original</span>
-                </div>
-              </div>
-            </div>
+          {/* Reverse Source Attribution (score < 75%) */}
+          <AttributionCard score={analysisResult.score} sha={analysisResult.sha} />
 
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl">
-              <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase mb-3 block">
-                ANOMALY HIGHLIGHTS
-              </span>
-              <ul className="space-y-2 text-xs font-mono">
-                {analysisResult.flags.length === 0 ? (
-                  <>
-                    <li className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> No frame drops detected</li>
-                    <li className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Consistent facial lighting</li>
-                    <li className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Natural eye blink movement</li>
-                    <li className="flex items-center gap-2 text-slate-300"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> No voice cloning artifacts</li>
-                  </>
-                ) : (
-                  analysisResult.flags.map((flag, idx) => (
-                    <li key={idx} className="flex items-center gap-2 text-amber-300">
-                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                      <span>[{flag.time}] {flag.label}</span>
-                    </li>
-                  ))
-                )}
-              </ul>
-            </div>
-
-            <div className="bg-[#0B132B]/80 border border-slate-800 rounded-xl p-4 shadow-xl">
-              <span className="text-[11px] font-semibold tracking-wider text-slate-400 uppercase mb-3 block">
-                FILE INFO
-              </span>
-              <div className="space-y-2 text-xs font-mono">
-                <div className="flex justify-between border-b border-slate-800/60 pb-1">
-                  <span className="text-slate-500">Format:</span>
-                  <span className="text-slate-200">{fileDetails?.type || "MP4 Video"}</span>
-                </div>
-                <div className="flex justify-between border-b border-slate-800/60 pb-1">
-                  <span className="text-slate-500">Resolution:</span>
-                  <span className="text-slate-200">1920 x 1080</span>
-                </div>
-                <div className="flex justify-between border-b border-slate-800/60 pb-1">
-                  <span className="text-slate-500">Duration:</span>
-                  <span className="text-slate-200">00:12 sec</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Frame Rate:</span>
-                  <span className="text-slate-200">30 fps</span>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </main>
 
-      {/* --- HISTORY MODAL --- */}
+      {/* === MODALS === */}
+
+      {/* History Modal */}
       {showHistoryModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#0B132B] border border-slate-800 rounded-xl max-w-xl w-full p-5 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <History className="h-4 w-4 text-cyan-400" /> Saved Reports History
-              </h3>
-              <button
-                onClick={() => setShowHistoryModal(false)}
-                className="text-slate-400 hover:text-white cursor-pointer text-xs font-mono"
-              >
-                ✕ Close
-              </button>
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2"><History className="h-4 w-4 text-cyan-400" /> Saved Reports</h3>
+              <button onClick={() => setShowHistoryModal(false)} className="text-slate-400 hover:text-white cursor-pointer text-xs font-mono">✕ Close</button>
             </div>
-
             {savedReports.length === 0 ? (
-              <p className="text-xs text-slate-400 font-mono py-6 text-center">
-                No saved reports found in browser storage yet. Click "Save Report" after analyzing a video!
-              </p>
+              <p className="text-xs text-slate-400 font-mono py-6 text-center">No saved reports. Analyze media and click "Save" to begin.</p>
             ) : (
               <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
                 {savedReports.map((item) => (
                   <div key={item.id} className="bg-slate-900/80 border border-slate-800 p-3 rounded flex items-center gap-3 text-xs font-mono">
                     <div className="w-16 h-12 bg-black rounded overflow-hidden border border-slate-700 shrink-0 flex items-center justify-center">
-                      {item.thumbnailUrl ? (
-                        <img src={item.thumbnailUrl} alt="Thumbnail" className="w-full h-full object-cover" />
-                      ) : (
-                        <ImageIcon className="h-5 w-5 text-slate-600" />
-                      )}
+                      {item.thumbnailUrl ? <img src={item.thumbnailUrl} alt="" className="w-full h-full object-cover" /> : <ImageIcon className="h-5 w-5 text-slate-600" />}
                     </div>
-
                     <div className="flex-1 min-w-0">
                       <div className="text-slate-200 font-medium truncate">{item.fileName}</div>
-                      <div className="text-[10px] text-slate-500">{item.timestamp}</div>
+                      <div className="text-[10px] text-slate-500">{item.timestamp} · {item.mediaType?.toUpperCase() || 'VIDEO'}</div>
                     </div>
-
                     <div className="flex items-center gap-2 shrink-0">
-                      <span className={`px-2 py-0.5 rounded font-bold ${item.score > 75 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>
-                        {item.score}%
-                      </span>
-                      <button
-                        onClick={() => handleReopenProject(item)}
-                        className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1 rounded transition-colors text-[11px] cursor-pointer flex items-center gap-1"
-                      >
-                        <ExternalLink className="h-3 w-3" /> Reopen
+                      <span className={`px-2 py-0.5 rounded font-bold ${item.score > 75 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>{item.score}%</span>
+                      <button onClick={() => handleReopenProject(item)} className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold px-2.5 py-1 rounded transition-colors text-[11px] cursor-pointer flex items-center gap-1">
+                        <ExternalLink className="h-3 w-3" /> Open
                       </button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
-
             <div className="pt-2 flex justify-end">
-              <button
-                onClick={() => {
-                  localStorage.removeItem("deepsync_reports_history");
-                  setSavedReports([]);
-                }}
-                className="text-xs text-red-400 hover:text-red-300 font-mono cursor-pointer"
-              >
-                Clear History
-              </button>
+              <button onClick={() => { localStorage.removeItem("deepsync_reports_history"); setSavedReports([]); }} className="text-xs text-red-400 hover:text-red-300 font-mono cursor-pointer">Clear History</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- IN-APP FORMATTED REPORT VIEWER MODAL --- */}
-      {showReportModal && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
-          <div className="bg-[#0F172A] border border-slate-800 rounded-xl max-w-2xl w-full p-6 space-y-4 shadow-2xl overflow-y-auto max-h-[85vh]">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-white font-mono">MAYA - Audit Report Viewer</h3>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleExportReport}
-                  className="bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold text-xs px-3 py-1 rounded flex items-center gap-1 cursor-pointer"
-                >
-                  <Download className="h-3.5 w-3.5" /> Download HTML/PDF
-                </button>
-                <button
-                  onClick={() => setShowReportModal(false)}
-                  className="text-slate-400 hover:text-white text-xs font-mono ml-2 cursor-pointer"
-                >
-                  ✕ Close
-                </button>
-              </div>
-            </div>
-
-            {/* Printable Styled Report Content */}
-            <div className="bg-slate-900 border border-slate-800 rounded-lg p-6 space-y-4 text-xs font-mono">
-              <div className="flex justify-between items-start border-b border-slate-800 pb-4">
-                <div>
-                  <div className="text-lg font-black tracking-wider text-cyan-300 font-mono">MAYA</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5">Target Media: {fileDetails?.name || inputUrl || "Uploaded_Media.mp4"}</div>
-                </div>
-                <div className="text-right">
-                  <div className="text-2xl font-bold text-emerald-400">{analysisResult.score !== null ? `${analysisResult.score}%` : "Pending"}</div>
-                  <div className="text-[10px] text-slate-400">{analysisResult.statusText}</div>
-                </div>
-              </div>
-
-              {/* Video Thumbnail Section */}
-              <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex items-center gap-4">
-                <div className="w-36 h-24 bg-black rounded overflow-hidden border border-slate-700 shrink-0 flex items-center justify-center relative">
-                  {(thumbnailUrl || captureVideoThumbnail()) ? (
-                    <img src={thumbnailUrl || captureVideoThumbnail()} alt="Video Frame Thumbnail" className="w-full h-full object-cover" />
-                  ) : (
-                    <span className="text-[10px] text-slate-500">Video Preview</span>
-                  )}
-                </div>
-                <div>
-                  <div className="text-xs font-bold text-slate-200">Analyzed Media Frame Snapshot</div>
-                  <div className="text-[10px] text-slate-400 mt-1">Facial Landmark Mesh & Audio-Visual alignment frame extracted during analysis.</div>
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[11px] font-bold text-cyan-400 uppercase mb-2">Multi-Layer Verification Checks</div>
-                <div className="space-y-1.5">
-                  {analysisResult.verifications.map((v, i) => (
-                    <div key={i} className="flex justify-between p-2 rounded bg-slate-950 border border-slate-800">
-                      <span className="text-slate-300">{v.label}</span>
-                      <span className="text-emerald-400 font-semibold">{v.value} ({v.status})</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[11px] font-bold text-cyan-400 uppercase mb-2">Flagged Forensic Anomalies</div>
-                {analysisResult.flags.length === 0 ? (
-                  <div className="text-emerald-400 bg-emerald-500/10 p-2.5 rounded border border-emerald-500/30">
-                    ✓ Zero forensic anomalies detected. Media appears authentic.
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {analysisResult.flags.map((f, i) => (
-                      <div key={i} className="text-amber-300 bg-amber-500/10 p-2 rounded border border-amber-500/30">
-                        ⚠️ [{f.time}] {f.label} - {f.detail || 'Mismatch detected'}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* C2PA Certificate Modal */}
+      <C2PAExportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        onExport={handleExportReport}
+        score={analysisResult.score}
+        statusText={analysisResult.statusText}
+        sha={analysisResult.sha}
+        flags={analysisResult.flags}
+        verifications={analysisResult.verifications}
+        fileDetails={fileDetails}
+        inputUrl={inputUrl}
+        mediaType={mediaType}
+        audioAiResult={audioAiResult}
+        nlpMetadataResult={nlpMetadataResult}
+        facialAnomalies={facialAnomalies}
+        thumbnailUrl={thumbnailUrl}
+      />
 
     </div>
   );

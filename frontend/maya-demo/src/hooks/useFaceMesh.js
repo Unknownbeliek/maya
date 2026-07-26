@@ -1,121 +1,176 @@
-import { useEffect, useRef, useState } from 'react';
+// src/hooks/useFaceMesh.js
+// Layer 2: 3D Spatial Vision — Temporal Jitter, Z-Depth Variance, Bounding Box Stability
+//
+// KEY INSIGHT: AI avatars (HeyGen, D-ID, Synthesia) have face landmarks BUT their
+// Z-axis motion is unnaturally smooth (near-zero variance) because diffusion model outputs
+// lack the micro-tremors of a real human face. We exploit this physical impossibility.
+//
+// Metrics exported via meshMetrics in onResults():
+//   hasUnnaturalMeshSmoothing  - Z-axis std dev < 0.0008 (AI avatar diffusion smoothing)
+//   hasTeleportationJitter     - Inter-frame centroid leap > 0.05 (discontinuous frame blending)
+//   hasZeroBlinkRate           - No blinks detected in a >10s window
+//   isFaceless                 - No face visible in the video
+
+import { useEffect, useRef, useCallback } from 'react';
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { getEAR, EYE_LANDMARKS, getMAR } from '../analysis/facial';
 
-// --- CONSTANTS ---
-const EAR_THRESHOLD = 0.2; // Threshold for blink detection
-const BLINK_CONSEC_FRAMES = 2;
-const BLINK_RATE_THRESHOLD = 0.1; // Blinks per second (6 per minute)
-const HEAD_RIGIDITY_THRESHOLD = 0.005; // Std. deviation of nose z-depth
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const EAR_THRESHOLD        = 0.20;   // Below this = eye closed (blink frame)
+const BLINK_CONSEC_FRAMES  = 2;      // Min frames closed to count as a blink
+const BLINK_RATE_THRESHOLD = 0.10;   // blinks/sec (6/min) — below = suspicious
+const NO_BLINK_WINDOW_SEC  = 10;     // If no blink in this window → flag
+const Z_DEPTH_WINDOW       = 10;     // Rolling frame buffer for Z-variance
+const Z_SMOOTH_THRESHOLD   = 0.0008; // σ below this = unnaturally smooth (AI avatar)
+const Z_JUMP_THRESHOLD     = 0.040;  // Single-frame Z jump > this = teleportation
+const CENTROID_JUMP_THR    = 0.050;  // Normalized face centroid jump (0.0–1.0)
 
+// ─── MATH HELPERS ─────────────────────────────────────────────────────────────
+function stdDev(arr) {
+  if (arr.length < 2) return 0;
+  const mean = arr.reduce((s, v) => s + v, 0) / arr.length;
+  const variance = arr.reduce((s, v) => s + (v - mean) ** 2, 0) / arr.length;
+  return Math.sqrt(variance);
+}
+
+// ─── HOOK ─────────────────────────────────────────────────────────────────────
 export const useFaceMesh = (videoRef, canvasRef, onResults, isAnalyzing) => {
-  const faceLandmarkerRef = useRef(null);
+  const faceLandmarkerRef   = useRef(null);
   const animationFrameIdRef = useRef(null);
 
-  // Web Audio API refs
-  const audioCtxRef = useRef(null);
-  const analyserRef = useRef(null);
+  // Web Audio refs
+  const audioCtxRef    = useRef(null);
+  const analyserRef    = useRef(null);
   const audioSourceRef = useRef(null);
 
-  const analysisState = useRef({
-    consecutiveFramesWithoutFace: 0,
-    blinkCounter: 0,
+  // Persistent analysis state across frames
+  const S = useRef({
+    // Blink tracking
+    consecutiveClosedFrames: 0,
     blinks: 0,
-    headZReadings: [],
-    desyncFrames: 0,
-    marReadings: [],
-    audioReadings: [],
-    anomalies: [],
+    lastBlinkTimeSec: 0,
+
+    // Temporal depth tracking (10-frame rolling window)
+    zDepthWindow:    [],   // nose tip Z values
+    prevNoseZ:       null, // for frame-to-frame jump detection
+    hasTeleport:     false,
+    hasZSmoothing:   false,
+
+    // Centroid tracking
+    centroidWindow:  [],   // { x, y } nose tip normalized
+    prevCentroid:    null,
+
+    // Lip-sync
+    desyncFrames:    0,
+    anomalies:       [],
+
+    // Audio readings for live display
+    marReadings:     [],
+    audioReadings:   [],
+
+    // Session counters
+    totalFaceFrames: 0,
+    totalFrames:     0,
   }).current;
 
-  // Initialize MediaPipe FaceLandmarker
+  // ── MediaPipe initialization ───────────────────────────────────────────────
   useEffect(() => {
-    const initLandmarker = async () => {
+    let closed = false;
+    const init = async () => {
       try {
         const filesetResolver = await FilesetResolver.forVisionTasks('/wasm');
         const landmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
           baseOptions: { modelAssetPath: '/models/face_landmarker.task', delegate: 'CPU' },
           runningMode: 'VIDEO',
           outputFacialTransformationMatrixes: true,
-          numFaces: 1
+          numFaces: 1,
         });
-        faceLandmarkerRef.current = landmarker;
-        console.log("✅ Face Landmarker initialized successfully.");
-      } catch (error) {
-        console.error("❌ Failed to initialize Face Landmarker:", error);
+        if (!closed) {
+          faceLandmarkerRef.current = landmarker;
+          console.log('✅ Face Landmarker initialized successfully.');
+        }
+      } catch (err) {
+        console.error('❌ FaceLandmarker init failed:', err);
       }
     };
-    initLandmarker();
-    return () => faceLandmarkerRef.current?.close();
+    init();
+    return () => {
+      closed = true;
+      faceLandmarkerRef.current?.close();
+    };
   }, []);
 
-  // Web Audio API setup
+  // ── AudioContext: setup on video play + resume on pointerdown ─────────────
   useEffect(() => {
-    if (!videoRef.current) return;
     const video = videoRef.current;
+    if (!video) return;
 
-    const setupAudioAnalyser = () => {
-      try {
-        if (!audioCtxRef.current) {
-          const AudioCtx = window.AudioContext || window.webkitAudioContext;
-          audioCtxRef.current = new AudioCtx();
-        }
-
-        if (audioCtxRef.current.state === 'suspended') {
-          audioCtxRef.current.resume();
-        }
-
-        if (!audioSourceRef.current && video) {
-          const source = audioCtxRef.current.createMediaElementSource(video);
-          const analyser = audioCtxRef.current.createAnalyser();
-          analyser.fftSize = 512;
-          analyser.smoothingTimeConstant = 0.8;
-          source.connect(analyser);
-          analyser.connect(audioCtxRef.current.destination);
-
-          audioSourceRef.current = source;
-          analyserRef.current = analyser;
-        }
-      } catch (e) {
-        console.warn("Web Audio API source connection info:", e.message);
+    const resumeCtx = () => {
+      if (audioCtxRef.current?.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {});
       }
     };
 
-    video.addEventListener('play', setupAudioAnalyser);
-    return () => video.removeEventListener('play', setupAudioAnalyser);
+    const setupAudio = () => {
+      try {
+        if (!audioCtxRef.current) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          audioCtxRef.current = new Ctx();
+        }
+        resumeCtx();
+
+        if (!audioSourceRef.current) {
+          const source   = audioCtxRef.current.createMediaElementSource(video);
+          const analyser = audioCtxRef.current.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.smoothingTimeConstant = 0.80;
+          source.connect(analyser);
+          analyser.connect(audioCtxRef.current.destination);
+          audioSourceRef.current = source;
+          analyserRef.current    = analyser;
+        }
+      } catch (e) {
+        console.warn('[useFaceMesh] AudioContext setup:', e.message);
+      }
+    };
+
+    video.addEventListener('play', setupAudio);
+    // ── CRITICAL FIX: resume suspended ctx on any user gesture ──────────────
+    window.addEventListener('pointerdown', resumeCtx, { passive: true });
+
+    return () => {
+      video.removeEventListener('play', setupAudio);
+      window.removeEventListener('pointerdown', resumeCtx);
+    };
   }, [videoRef]);
 
-  // Main Continuous Render Loop (Runs whenever video is playing)
+  // ── Main RAF render loop ───────────────────────────────────────────────────
   useEffect(() => {
     const render = () => {
       animationFrameIdRef.current = requestAnimationFrame(render);
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
+      const video    = videoRef.current;
+      const canvas   = canvasRef.current;
       const landmarker = faceLandmarkerRef.current;
 
-      if (!video || !canvas || video.readyState < 2 || video.paused) {
-        return;
-      }
+      if (!video || !canvas || video.readyState < 2 || video.paused) return;
 
+      // ── Canvas sizing ──────────────────────────────────────────────────────
       const ctx = canvas.getContext('2d');
-      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-      }
-
+      if (canvas.width  !== (video.videoWidth  || 640)) canvas.width  = video.videoWidth  || 640;
+      if (canvas.height !== (video.videoHeight || 480)) canvas.height = video.videoHeight || 480;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Extract Web Audio Volume
-      let currentAudioVolume = 0.45;
+      S.totalFrames++;
+
+      // ── Live audio volume ──────────────────────────────────────────────────
+      let currentAudioVolume = 0;
       if (analyserRef.current) {
         try {
           const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
           analyserRef.current.getByteFrequencyData(dataArray);
-          const sum = dataArray.reduce((acc, val) => acc + val, 0);
+          const sum = dataArray.reduce((a, v) => a + v, 0);
           currentAudioVolume = sum / (dataArray.length * 255);
-        } catch (e) {
-          currentAudioVolume = 0.45;
-        }
+        } catch (_) {}
       }
 
       if (!landmarker) return;
@@ -123,110 +178,154 @@ export const useFaceMesh = (videoRef, canvasRef, onResults, isAnalyzing) => {
       let results = null;
       try {
         results = landmarker.detectForVideo(video, performance.now());
-      } catch (err) {
-        // Fallback for CORS restricted video frames
-        results = null;
-      }
+      } catch (_) {}
 
       if (results?.faceLandmarks?.[0]) {
-        analysisState.consecutiveFramesWithoutFace = 0;
-        const landmarks = results.faceLandmarks[0];
+        S.totalFaceFrames++;
+        const lm = results.faceLandmarks[0];
 
-        // 1. Blink Detection
-        const leftEAR = getEAR(EYE_LANDMARKS.left.map(p => landmarks[p.index]));
-        const rightEAR = getEAR(EYE_LANDMARKS.right.map(p => landmarks[p.index]));
-        const avgEAR = (leftEAR + rightEAR) / 2.0;
+        // ── Blink detection (EAR) ────────────────────────────────────────────
+        const leftEAR  = getEAR(EYE_LANDMARKS.left.map(p  => lm[p.index]));
+        const rightEAR = getEAR(EYE_LANDMARKS.right.map(p => lm[p.index]));
+        const avgEAR   = (leftEAR + rightEAR) / 2.0;
 
         if (avgEAR < EAR_THRESHOLD) {
-          analysisState.blinkCounter++;
+          S.consecutiveClosedFrames++;
         } else {
-          if (analysisState.blinkCounter > BLINK_CONSEC_FRAMES) {
-            analysisState.blinks++;
+          if (S.consecutiveClosedFrames >= BLINK_CONSEC_FRAMES) {
+            S.blinks++;
+            S.lastBlinkTimeSec = video.currentTime;
           }
-          analysisState.blinkCounter = 0;
+          S.consecutiveClosedFrames = 0;
         }
 
-        // 2. Head Pose & MAR
-        const noseZ = landmarks[4]?.z;
-        if (noseZ) analysisState.headZReadings.push(noseZ);
-
-        const currentMAR = getMAR(landmarks);
-        analysisState.marReadings.push(currentMAR);
-        analysisState.audioReadings.push(currentAudioVolume);
-
-        // 3. Lip Sync Desync Detection
-        const isAudioActive = currentAudioVolume > 0.15;
-        const isMouthOpen = currentMAR > 0.22;
-
-        if ((isAudioActive && !isMouthOpen) || (!isAudioActive && currentMAR > 0.35)) {
-          analysisState.desyncFrames++;
-          if (analysisState.desyncFrames > 10) {
-            const timestamp = video.currentTime.toFixed(2);
-            const detail = isAudioActive ? `Audio (${(currentAudioVolume * 100).toFixed(0)}%) without Lip Motion` : `Lip Opening (MAR: ${currentMAR.toFixed(2)}) without Audio`;
-            
-            const recentLog = analysisState.anomalies.find(a => a.type === "Lip-Sync Misalignment" && Math.abs(parseFloat(a.time) - parseFloat(timestamp)) < 2.0);
-            if (!recentLog) {
-              analysisState.anomalies.push({
-                time: timestamp,
-                type: "Lip-Sync Misalignment",
-                detail: detail
+        // ── Z-Axis Temporal Variance (CRITICAL — detects AI avatar smoothing) ─
+        const noseZ = lm[4]?.z;
+        if (noseZ !== undefined && noseZ !== null) {
+          // Jump detection: single-frame teleportation
+          if (S.prevNoseZ !== null) {
+            const deltaZ = Math.abs(noseZ - S.prevNoseZ);
+            if (deltaZ > Z_JUMP_THRESHOLD && !S.hasTeleport) {
+              S.hasTeleport = true;
+              S.anomalies.push({
+                time:   video.currentTime.toFixed(2),
+                type:   'Teleportation Z-Jitter',
+                detail: `ΔZ = ${deltaZ.toFixed(4)} (threshold: ${Z_JUMP_THRESHOLD})`,
               });
             }
-            analysisState.desyncFrames = 0;
+          }
+          S.prevNoseZ = noseZ;
+
+          // Rolling variance check
+          S.zDepthWindow.push(noseZ);
+          if (S.zDepthWindow.length > Z_DEPTH_WINDOW) S.zDepthWindow.shift();
+          if (S.zDepthWindow.length === Z_DEPTH_WINDOW) {
+            const σ = stdDev(S.zDepthWindow);
+            if (σ < Z_SMOOTH_THRESHOLD && !S.hasZSmoothing) {
+              S.hasZSmoothing = true;
+              S.anomalies.push({
+                time:   video.currentTime.toFixed(2),
+                type:   'Unnatural Mesh Smoothing',
+                detail: `Z-depth σ = ${σ.toFixed(6)} (threshold: ${Z_SMOOTH_THRESHOLD})`,
+              });
+            }
+          }
+        }
+
+        // ── Bounding Box / Centroid Stability ────────────────────────────────
+        const noseX = lm[4]?.x ?? 0.5;
+        const noseY = lm[4]?.y ?? 0.5;
+        if (S.prevCentroid) {
+          const dist = Math.sqrt((noseX - S.prevCentroid.x) ** 2 + (noseY - S.prevCentroid.y) ** 2);
+          if (dist > CENTROID_JUMP_THR && !S.hasTeleport) {
+            S.hasTeleport = true;
+            S.anomalies.push({
+              time:   video.currentTime.toFixed(2),
+              type:   'Teleportation Jitter',
+              detail: `Centroid leap ${(dist * 100).toFixed(1)}% face-width`,
+            });
+          }
+        }
+        S.prevCentroid = { x: noseX, y: noseY };
+
+        // ── MAR & Lip-Sync ────────────────────────────────────────────────────
+        const currentMAR = getMAR(lm);
+        S.marReadings.push(currentMAR);
+        S.audioReadings.push(currentAudioVolume);
+
+        const isAudioActive = currentAudioVolume > 0.15;
+        const isMouthOpen   = currentMAR > 0.22;
+
+        if ((isAudioActive && !isMouthOpen) || (!isAudioActive && currentMAR > 0.35)) {
+          S.desyncFrames++;
+          if (S.desyncFrames > 10) {
+            const ts = video.currentTime.toFixed(2);
+            const detail = isAudioActive
+              ? `Audio (${(currentAudioVolume * 100).toFixed(0)}%) without lip motion`
+              : `Lip opening (MAR: ${currentMAR.toFixed(2)}) without audio`;
+            const recentDuplicate = S.anomalies.find(
+              a => a.type === 'Lip-Sync Misalignment' && Math.abs(parseFloat(a.time) - parseFloat(ts)) < 2.0
+            );
+            if (!recentDuplicate) {
+              S.anomalies.push({ time: ts, type: 'Lip-Sync Misalignment', detail });
+            }
+            S.desyncFrames = 0;
           }
         } else {
-          analysisState.desyncFrames = Math.max(0, analysisState.desyncFrames - 1);
+          S.desyncFrames = Math.max(0, S.desyncFrames - 1);
         }
 
-        // --- DRAW FACIAL MESH LANDMARKS ---
+        // ── Draw 468 Landmarks ────────────────────────────────────────────────
         ctx.fillStyle = '#10B981';
-        landmarks.forEach(lm => {
-          ctx.fillRect(lm.x * canvas.width, lm.y * canvas.height, 2, 2);
+        lm.forEach(pt => {
+          ctx.fillRect(pt.x * canvas.width - 1, pt.y * canvas.height - 1, 2, 2);
         });
-
-        // Highlight Mouth Landmarks in Cyan
-        const mouthIndices = [13, 14, 61, 291, 82, 87, 312, 317];
+        // Highlight mouth in cyan
         ctx.fillStyle = '#06B6D4';
-        mouthIndices.forEach(idx => {
-          if (landmarks[idx]) {
-            ctx.beginPath();
-            ctx.arc(landmarks[idx].x * canvas.width, landmarks[idx].y * canvas.height, 3.5, 0, 2 * Math.PI);
-            ctx.fill();
-          }
+        [13, 14, 61, 291, 82, 87, 312, 317].forEach(idx => {
+          const pt = lm[idx];
+          if (!pt) return;
+          ctx.beginPath();
+          ctx.arc(pt.x * canvas.width, pt.y * canvas.height, 3.5, 0, 2 * Math.PI);
+          ctx.fill();
         });
 
-        // Pass real-time metrics back to UI
+        // ── Report to UI ──────────────────────────────────────────────────────
         if (onResults) {
           onResults({
-            facialAnomalies: [...analysisState.anomalies],
-            liveLipSync: { mar: currentMAR, audioVolume: currentAudioVolume }
+            isFaceless:     false,
+            facialAnomalies: [...S.anomalies],
+            liveLipSync:    { mar: currentMAR, audioVolume: currentAudioVolume },
+            meshMetrics: {
+              hasUnnaturalMeshSmoothing: S.hasZSmoothing,
+              hasTeleportationJitter:    S.hasTeleport,
+              hasZeroBlinkRate:          false, // evaluated at finalize time
+              isFacelessMedia:           false,
+            },
           });
         }
-      } else {
-        // Render fallback face tracking mesh if MediaPipe landmark detection is restricted on CORS URL
-        ctx.strokeStyle = '#06B6D4';
-        ctx.lineWidth = 2;
-        const w = canvas.width;
-        const h = canvas.height;
 
-        // Draw animated facial mesh bounding frame
-        ctx.strokeRect(w * 0.3, h * 0.2, w * 0.4, h * 0.55);
-        
-        // Draw synthetic mouth landmark dots
-        ctx.fillStyle = '#10B981';
-        const mouthX = w * 0.5;
-        const mouthY = h * 0.62;
-        ctx.beginPath();
-        ctx.arc(mouthX - 20, mouthY, 4, 0, 2 * Math.PI);
-        ctx.arc(mouthX + 20, mouthY, 4, 0, 2 * Math.PI);
-        ctx.arc(mouthX, mouthY - 10, 4, 0, 2 * Math.PI);
-        ctx.arc(mouthX, mouthY + 10, 4, 0, 2 * Math.PI);
-        ctx.fill();
+      } else {
+        // ── No face detected ─────────────────────────────────────────────────
+        // Draw subtle scanning frame to indicate active detection
+        ctx.strokeStyle = 'rgba(6,182,212,0.4)';
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([6, 4]);
+        const [w, h] = [canvas.width, canvas.height];
+        ctx.strokeRect(w * 0.28, h * 0.18, w * 0.44, h * 0.58);
+        ctx.setLineDash([]);
 
         if (onResults) {
           onResults({
-            facialAnomalies: [...analysisState.anomalies],
-            liveLipSync: { mar: 0.28, audioVolume: currentAudioVolume }
+            isFaceless:      true,
+            facialAnomalies: [...S.anomalies],
+            liveLipSync:     { mar: 0, audioVolume: currentAudioVolume },
+            meshMetrics: {
+              hasUnnaturalMeshSmoothing: S.hasZSmoothing,
+              hasTeleportationJitter:    S.hasTeleport,
+              hasZeroBlinkRate:          false,
+              isFacelessMedia:           true,
+            },
           });
         }
       }
@@ -234,21 +333,40 @@ export const useFaceMesh = (videoRef, canvasRef, onResults, isAnalyzing) => {
 
     if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
     render();
-
-    return () => cancelAnimationFrame(animationFrameIdRef.current);
+    return () => {
+      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
+    };
   }, [videoRef, canvasRef, onResults]);
 
-  // Finalize Analysis callback
+  // ── Finalize: evaluate blink rate when analysis stops ─────────────────────
   useEffect(() => {
-    if (!isAnalyzing && analysisState.headZReadings.length > 10) {
-      const videoDuration = videoRef.current?.duration || 1;
-      const blinkRate = analysisState.blinks / videoDuration;
-      
-      if (blinkRate < BLINK_RATE_THRESHOLD) {
-        analysisState.anomalies.push({ time: "00:04", type: "AI Generation / Low Blink Rate", detail: `${blinkRate.toFixed(2)} blinks/sec` });
-      }
+    if (isAnalyzing || S.totalFaceFrames < 5) return;
 
-      onResults({ facialAnomalies: [...analysisState.anomalies] });
+    const videoDuration = videoRef.current?.duration || 1;
+    const blinkRate     = S.blinks / videoDuration;
+    const hasZeroBlinks = blinkRate < BLINK_RATE_THRESHOLD && videoDuration > NO_BLINK_WINDOW_SEC;
+
+    if (hasZeroBlinks) {
+      S.anomalies.push({
+        time:   '00:00',
+        type:   'Zero Blink Rate',
+        detail: `${blinkRate.toFixed(3)} blinks/sec (min: ${BLINK_RATE_THRESHOLD})`,
+      });
     }
+
+    if (onResults) {
+      onResults({
+        isFaceless:      S.totalFaceFrames === 0,
+        facialAnomalies: [...S.anomalies],
+        liveLipSync:     { mar: 0, audioVolume: 0 },
+        meshMetrics: {
+          hasUnnaturalMeshSmoothing: S.hasZSmoothing,
+          hasTeleportationJitter:    S.hasTeleport,
+          hasZeroBlinkRate:          hasZeroBlinks,
+          isFacelessMedia:           S.totalFaceFrames === 0,
+        },
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAnalyzing]);
 };
