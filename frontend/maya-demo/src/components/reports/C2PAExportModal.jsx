@@ -8,6 +8,7 @@ export default function C2PAExportModal({
   fileDetails, inputUrl, mediaType,
   audioAiResult, nlpMetadataResult, facialAnomalies = [],
   mediaTypeLabel, samplingStrategy, primaryAnomaly,
+  forensicReport,
   thumbnailUrl,
 }) {
   if (!isOpen) return null;
@@ -125,6 +126,19 @@ export default function C2PAExportModal({
               ✓ Zero forensic anomalies detected across all analysis layers.
             </div>
           )}
+
+          {forensicReport?.paragraphs?.length > 0 && (
+            <div>
+              <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Forensic Narrative</div>
+              <div className="space-y-3 rounded border border-slate-800 bg-slate-900/40 p-4">
+                {forensicReport.paragraphs.map((paragraph) => (
+                  <p key={paragraph.slice(0, 24)} className="text-[12px] leading-relaxed text-slate-300 whitespace-pre-line">
+                    {paragraph}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -137,7 +151,7 @@ export default function C2PAExportModal({
               Close
             </button>
             <button onClick={onExport} className="flex items-center gap-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white px-3 py-1.5 rounded transition-colors cursor-pointer">
-              <Download className="h-3.5 w-3.5" /> Export HTML
+              <Download className="h-3.5 w-3.5" /> Export PDF
             </button>
           </div>
         </div>

@@ -99,7 +99,7 @@ export default function TimelineScrubber({
             onClick={() => jumpTo(badge.start)}
             className={`w-full flex items-center gap-2 rounded-md border px-3 py-2 text-left transition-colors cursor-pointer ${badgeStyles[badge.severity] || badgeStyles.watch}`}
           >
-            <span className="shrink-0 text-[11px] font-mono font-semibold">{badge.label}</span>
+            <span className="shrink-0 text-[11px] font-mono font-semibold">{`${badge.startLabel || ''} | ${badge.label}`.trim()}</span>
             {badge.detail && <span className="ml-auto text-[11px] font-mono opacity-80">{badge.detail}</span>}
           </button>
         ))}
